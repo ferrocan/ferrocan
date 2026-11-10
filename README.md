@@ -37,7 +37,8 @@ controller reports the frame acknowledged.
 Changes of bus state reach the host as error frames (error passive, bus-off,
 restarted, with the error counters), and lost frames as the overflow flag:
 with no bus attached, one frame takes the channel to error passive and
-bus-off, which Linux follows, and a down/up restarts it.
+bus-off, which Linux follows. After 100 ms bus-off the channel recovers by
+itself, as candleLight and Kvaser's adapters do, and Linux counts the restart.
 
 Not yet: DFU detach, a real bus.
 

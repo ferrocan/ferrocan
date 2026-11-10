@@ -15,14 +15,14 @@
 use core::cell::RefCell;
 use core::future::pending as never;
 
-use can_hal::{BusState, BusStatus, CanFrame, CanId, ConfirmedTransmit, ErrorCounters, Event, Outcome, Statistics, TransmitId};
+use can_hal::{BusState, BusStatus, CanFrame, CanId, ConfirmedTransmit, ErrorCounters, Event, Outcome, Recover, Statistics, TransmitId};
 use can_hal_bxcan::{BitTiming, Config, Mode};
 use defmt::{debug, info, warn};
-use embassy_futures::select::{Either3, select3};
+use embassy_futures::select::{Either4, select4};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
-use embassy_time::Instant;
+use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::Handler;
 use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestType};
 use embassy_usb::driver::{EndpointError, EndpointIn, EndpointOut};
@@ -188,6 +188,27 @@ fn micros(instant: Instant) -> u32 {
     instant.as_micros() as u32
 }
 
+/// How long the channel stays bus-off before it starts recovering by itself,
+/// as candleLight does: a node with a fault doesn't hammer the bus, and a
+/// host that wants to act has time to.
+const BUS_OFF_RESTART_DELAY: Duration = Duration::from_millis(100);
+
+/// How often to look whether recovery has finished: bxCAN has no interrupt
+/// for leaving bus-off. Recovery takes 128 times 11 recessive bits, 2.8 ms
+/// on an idle bus at 500 kbit/s.
+const RECOVERY_POLL: Duration = Duration::from_millis(10);
+
+/// Where an automatic recovery from bus-off stands.
+#[derive(Clone, Copy)]
+enum Recovery {
+    /// Not bus-off, or not recovering.
+    Idle,
+    /// Bus-off: recovery starts at this time.
+    Due(Instant),
+    /// Recovering: look again at this time.
+    Waiting(Instant),
+}
+
 /// A frame the host sent, awaiting its report.
 struct Pending {
     id: TransmitId,
@@ -196,6 +217,11 @@ struct Pending {
 
 /// Moves frames between the bulk endpoints and the CAN channel, and acts on
 /// the host's start and reset. Never returns.
+///
+/// On going bus-off the channel recovers by itself after
+/// [`BUS_OFF_RESTART_DELAY`], and the host is told it restarted, as
+/// candleLight and Kvaser's adapters do; Linux's `gs_usb` has no restart of
+/// its own (`restart-ms` doesn't apply).
 pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &mut impl EndpointOut, shared: &Shared) -> ! {
     let mut pending: [Option<Pending>; 3] = [const { None }; 3];
     let mut running = false;
@@ -203,41 +229,33 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
     // The bus state last reported to the host, and the frames lost so far.
     let mut bus = BusState::ErrorActive;
     let mut lost = 0;
+    let mut recovery = Recovery::Idle;
     let mut out_buf = [0u8; 64];
     let mut in_buf = [0u8; CLASSIC_TS_LEN];
 
     loop {
         let room = running && pending.iter().any(Option::is_none);
         let read = async { if room { ep_out.read(&mut out_buf).await } else { never::<Result<usize, EndpointError>>().await } };
-        match select3(read, can.next_event(), shared.command.wait()).await {
-            Either3::First(Ok(len)) => {
-                let Ok(host) = HostFrame::decode(&out_buf[..len]) else {
-                    warn!("gs_usb: undecodable frame of {} bytes", len);
-                    continue;
-                };
-                let Some(frame) = to_can(&host) else {
-                    warn!("gs_usb: unsupported frame, echoed unsent");
-                    let mut echo = host;
-                    echo.timestamp_us = timestamps.then(|| micros(Instant::now()));
-                    write(ep_in, echo.encode(&mut in_buf)).await;
-                    continue;
-                };
-                match can.try_transmit(&frame) {
-                    Ok(id) => {
-                        if let Some(slot) = pending.iter_mut().find(|p| p.is_none()) {
-                            *slot = Some(Pending { id, frame: host });
-                        }
-                    }
-                    Err(e) => warn!("gs_usb: no room for a frame: {}", defmt::Debug2Format(&e)),
-                }
+        let wake = match recovery {
+            Recovery::Idle => None,
+            Recovery::Due(at) | Recovery::Waiting(at) => Some(at),
+        };
+        let timer = async move {
+            match wake {
+                Some(at) => Timer::at(at).await,
+                None => never::<()>().await,
             }
-            Either3::First(Err(EndpointError::Disabled)) => {
+        };
+        match select4(read, can.next_event(), shared.command.wait(), timer).await {
+            Either4::First(Ok(len)) => from_host(can, ep_in, &mut in_buf, &mut pending, &out_buf[..len], timestamps).await,
+            Either4::First(Err(EndpointError::Disabled)) => {
                 info!("gs_usb: USB disabled, leaving the bus");
                 stop(can, &mut pending, &mut running);
+                recovery = Recovery::Idle;
                 ep_out.wait_enabled().await;
             }
-            Either3::First(Err(EndpointError::BufferOverflow)) => warn!("gs_usb: OUT transfer too long"),
-            Either3::Second(event) => match event {
+            Either4::First(Err(EndpointError::BufferOverflow)) => warn!("gs_usb: OUT transfer too long"),
+            Either4::Second(event) => match event {
                 Event::Received(received) if running => {
                     let mut host = from_can(received.frame(), ECHO_ID_RX);
                     host.timestamp_us = timestamps.then(|| micros(*received.timestamp()));
@@ -268,15 +286,19 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
                     let counters = can.error_counters().unwrap_or(ErrorCounters { transmit: 0, receive: 0 });
                     info!("gs_usb: bus {}, counters {}/{}", defmt::Debug2Format(&state), counters.transmit, counters.receive);
                     if running && state != bus {
-                        let mut host = error_frame(bus, state, counters);
-                        host.timestamp_us = timestamps.then(|| micros(Instant::now()));
-                        write(ep_in, host.encode(&mut in_buf)).await;
+                        report_state(ep_in, &mut in_buf, bus, state, counters, timestamps).await;
                     }
                     bus = state;
+                    recovery = match state {
+                        BusState::BusOff if running => Recovery::Due(Instant::now() + BUS_OFF_RESTART_DELAY),
+                        BusState::BusOff => recovery,
+                        _ => Recovery::Idle,
+                    };
                 }
             },
-            Either3::Third(Command::Start { config, timestamps: stamped }) => {
+            Either4::Third(Command::Start { config, timestamps: stamped }) => {
                 stop(can, &mut pending, &mut running);
+                recovery = Recovery::Idle;
                 match can.reconfigure(config) {
                     Ok(()) => {
                         can.start();
@@ -289,12 +311,73 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
                     Err(e) => warn!("gs_usb: can't configure the controller: {}", e),
                 }
             }
-            Either3::Third(Command::Reset) => {
+            Either4::Third(Command::Reset) => {
                 stop(can, &mut pending, &mut running);
+                recovery = Recovery::Idle;
                 info!("gs_usb: reset");
+            }
+            Either4::Fourth(()) => {
+                recovery = recover(can, ep_in, &mut in_buf, recovery, timestamps).await;
+                if matches!(recovery, Recovery::Idle) {
+                    bus = BusState::ErrorActive;
+                }
             }
         }
     }
+}
+
+/// Hands a frame from the host to the channel, or, if this device can't send
+/// it, echoes it unsent so the host's slot is freed.
+async fn from_host(can: &mut CanChannel, ep_in: &mut impl EndpointIn, in_buf: &mut [u8; CLASSIC_TS_LEN], pending: &mut [Option<Pending>; 3], bytes: &[u8], timestamps: bool) {
+    let Ok(host) = HostFrame::decode(bytes) else {
+        warn!("gs_usb: undecodable frame of {} bytes", bytes.len());
+        return;
+    };
+    let Some(frame) = to_can(&host) else {
+        warn!("gs_usb: unsupported frame, echoed unsent");
+        let mut echo = host;
+        echo.timestamp_us = timestamps.then(|| micros(Instant::now()));
+        write(ep_in, echo.encode(in_buf)).await;
+        return;
+    };
+    match can.try_transmit(&frame) {
+        Ok(id) => {
+            if let Some(slot) = pending.iter_mut().find(|p| p.is_none()) {
+                *slot = Some(Pending { id, frame: host });
+            }
+        }
+        Err(e) => warn!("gs_usb: no room for a frame: {}", defmt::Debug2Format(&e)),
+    }
+}
+
+/// The next step of an automatic recovery from bus-off, once its time has
+/// come: start it, or look whether it has finished and, if so, tell the host
+/// the channel restarted. [`Recovery::Idle`] once it has.
+async fn recover(can: &mut CanChannel, ep_in: &mut impl EndpointIn, in_buf: &mut [u8; CLASSIC_TS_LEN], recovery: Recovery, timestamps: bool) -> Recovery {
+    match recovery {
+        Recovery::Due(_) => {
+            info!("gs_usb: recovering from bus-off");
+            if let Err(e) = can.recover() {
+                warn!("gs_usb: can't start recovery: {}", e);
+            }
+            Recovery::Waiting(Instant::now() + RECOVERY_POLL)
+        }
+        Recovery::Waiting(_) if can.bus_state().is_ok_and(|state| state != BusState::BusOff) => {
+            let counters = can.error_counters().unwrap_or(ErrorCounters { transmit: 0, receive: 0 });
+            info!("gs_usb: recovered, counters {}/{}", counters.transmit, counters.receive);
+            report_state(ep_in, in_buf, BusState::BusOff, BusState::ErrorActive, counters, timestamps).await;
+            Recovery::Idle
+        }
+        Recovery::Waiting(_) => Recovery::Waiting(Instant::now() + RECOVERY_POLL),
+        Recovery::Idle => Recovery::Idle,
+    }
+}
+
+/// Tells the host the bus state went from `from` to `to`.
+async fn report_state(ep_in: &mut impl EndpointIn, in_buf: &mut [u8; CLASSIC_TS_LEN], from: BusState, to: BusState, counters: ErrorCounters, timestamps: bool) {
+    let mut host = error_frame(from, to, counters);
+    host.timestamp_us = timestamps.then(|| micros(Instant::now()));
+    write(ep_in, host.encode(in_buf)).await;
 }
 
 /// The frames the channel has lost so far: dropped from its event queue, or
