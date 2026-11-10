@@ -15,7 +15,7 @@
 use core::cell::RefCell;
 use core::future::pending as never;
 
-use can_hal::{CanFrame, CanId, ConfirmedTransmit, Event, Outcome, TransmitId};
+use can_hal::{BusState, BusStatus, CanFrame, CanId, ConfirmedTransmit, ErrorCounters, Event, Outcome, Statistics, TransmitId};
 use can_hal_bxcan::{BitTiming, Config, Mode};
 use defmt::{debug, info, warn};
 use embassy_futures::select::{Either3, select3};
@@ -26,7 +26,7 @@ use embassy_time::Instant;
 use embassy_usb::Handler;
 use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestType};
 use embassy_usb::driver::{EndpointError, EndpointIn, EndpointOut};
-use gs_usb_protocol::{BtConst, CLASSIC_TS_LEN, DeviceBittiming, DeviceConfig, DeviceMode, ECHO_ID_RX, HostFrame, Request as GsRequest, can_id, feature, mode};
+use gs_usb_protocol::{BtConst, CLASSIC_TS_LEN, DeviceBittiming, DeviceConfig, DeviceMode, ECHO_ID_RX, HostFrame, Request as GsRequest, can_err, can_id, feature, frame_flag, mode};
 
 use crate::board::{CAN_CLOCK_HZ, CanChannel};
 
@@ -200,6 +200,9 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
     let mut pending: [Option<Pending>; 3] = [const { None }; 3];
     let mut running = false;
     let mut timestamps = false;
+    // The bus state last reported to the host, and the frames lost so far.
+    let mut bus = BusState::ErrorActive;
+    let mut lost = 0;
     let mut out_buf = [0u8; 64];
     let mut in_buf = [0u8; CLASSIC_TS_LEN];
 
@@ -238,6 +241,13 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
                 Event::Received(received) if running => {
                     let mut host = from_can(received.frame(), ECHO_ID_RX);
                     host.timestamp_us = timestamps.then(|| micros(*received.timestamp()));
+                    // Frames lost since the last one received: the host
+                    // turns the flag into an overflow error frame.
+                    let now_lost = lost_frames(can);
+                    if now_lost > lost {
+                        host.flags |= frame_flag::OVERFLOW;
+                        lost = now_lost;
+                    }
                     write(ep_in, host.encode(&mut in_buf)).await;
                 }
                 Event::Received(_) => {}
@@ -254,7 +264,16 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
                     echo.timestamp_us = timestamps.then(|| micros(at));
                     write(ep_in, echo.encode(&mut in_buf)).await;
                 }
-                Event::BusStateChanged(state) => info!("gs_usb: bus {}", defmt::Debug2Format(&state)),
+                Event::BusStateChanged(state) => {
+                    let counters = can.error_counters().unwrap_or(ErrorCounters { transmit: 0, receive: 0 });
+                    info!("gs_usb: bus {}, counters {}/{}", defmt::Debug2Format(&state), counters.transmit, counters.receive);
+                    if running && state != bus {
+                        let mut host = error_frame(bus, state, counters);
+                        host.timestamp_us = timestamps.then(|| micros(Instant::now()));
+                        write(ep_in, host.encode(&mut in_buf)).await;
+                    }
+                    bus = state;
+                }
             },
             Either3::Third(Command::Start { config, timestamps: stamped }) => {
                 stop(can, &mut pending, &mut running);
@@ -263,6 +282,8 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
                         can.start();
                         running = true;
                         timestamps = stamped;
+                        bus = BusState::ErrorActive;
+                        lost = lost_frames(can);
                         info!("gs_usb: started, {}, timestamps {}", config.mode, timestamps);
                     }
                     Err(e) => warn!("gs_usb: can't configure the controller: {}", e),
@@ -273,6 +294,49 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
                 info!("gs_usb: reset");
             }
         }
+    }
+}
+
+/// The frames the channel has lost so far: dropped from its event queue, or
+/// overrun in the controller's receive FIFOs.
+fn lost_frames(can: &CanChannel) -> u64 {
+    can.statistics().map_or(0, |s| s.rx_dropped.unwrap_or(0) + s.rx_overruns.unwrap_or(0))
+}
+
+/// The error frame telling the host the bus state went from `from` to `to`,
+/// as Linux's `gs_usb` reads it: bus-off and restarts in the identifier,
+/// error passive and back to active in `data[1]`, and the error counters in
+/// `data[6]` and `data[7]`.
+fn error_frame(from: BusState, to: BusState, counters: ErrorCounters) -> HostFrame {
+    let mut can_id = can_id::ERR | can_err::CNT;
+    let mut data = [0; 8];
+    data[6] = counters.transmit;
+    data[7] = counters.receive;
+    match to {
+        BusState::BusOff => can_id |= can_err::BUSOFF,
+        BusState::ErrorPassive => {
+            can_id |= can_err::CRTL;
+            let passive = |count: u8, flag: u8| if count >= 128 { flag } else { 0 };
+            data[1] = passive(counters.transmit, can_err::crtl::TX_PASSIVE) | passive(counters.receive, can_err::crtl::RX_PASSIVE);
+            if data[1] == 0 {
+                // The counters fell back between the change and reading them.
+                data[1] = can_err::crtl::TX_PASSIVE;
+            }
+        }
+        BusState::ErrorActive if from == BusState::BusOff => can_id |= can_err::RESTARTED,
+        BusState::ErrorActive => {
+            can_id |= can_err::CRTL;
+            data[1] = can_err::crtl::ACTIVE;
+        }
+    }
+    HostFrame {
+        echo_id: ECHO_ID_RX,
+        can_id,
+        can_dlc: can_err::DLC,
+        channel: 0,
+        flags: 0,
+        data,
+        timestamp_us: None,
     }
 }
 

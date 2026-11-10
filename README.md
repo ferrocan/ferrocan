@@ -34,7 +34,12 @@ frames of every kind come back echoed and received, and `cangen` bursts of
 2000 frames at 0.3 ms intervals arrive complete, each echo sent when the
 controller reports the frame acknowledged.
 
-Not yet: error frames for bus state, DFU detach, a real bus.
+Changes of bus state reach the host as error frames (error passive, bus-off,
+restarted, with the error counters), and lost frames as the overflow flag:
+with no bus attached, one frame takes the channel to error passive and
+bus-off, which Linux follows, and a down/up restarts it.
+
+Not yet: DFU detach, a real bus.
 
 # Building
 

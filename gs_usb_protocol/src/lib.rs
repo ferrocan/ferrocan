@@ -145,6 +145,44 @@ pub mod can_id {
     pub const EFF_MASK: u32 = 0x1FFF_FFFF;
 }
 
+/// An error frame's contents: [`can_id::ERR`] with these bits in the
+/// identifier, and these values in the data, as in Linux's
+/// `linux/can/error.h`, which `gs_usb` passes on unchanged.
+pub mod can_err {
+    /// An error frame's DLC.
+    pub const DLC: u8 = 8;
+
+    /// Identifier: lost arbitration, the bit in `data[0]`.
+    pub const LOSTARB: u32 = 0x0000_0002;
+    /// Identifier: controller problems, in `data[1]` ([`crtl`]).
+    pub const CRTL: u32 = 0x0000_0004;
+    /// Identifier: no acknowledge on transmission.
+    pub const ACK: u32 = 0x0000_0020;
+    /// Identifier: bus-off.
+    pub const BUSOFF: u32 = 0x0000_0040;
+    /// Identifier: the controller restarted, back to error active.
+    pub const RESTARTED: u32 = 0x0000_0100;
+    /// Identifier: the error counters are in `data[6]` (transmit) and
+    /// `data[7]` (receive).
+    pub const CNT: u32 = 0x0000_0200;
+
+    /// `data[1]` of a [`CRTL`] error frame.
+    pub mod crtl {
+        /// The receive buffer overflowed.
+        pub const RX_OVERFLOW: u8 = 0x01;
+        /// The receive error counter reached the warning level (96).
+        pub const RX_WARNING: u8 = 0x04;
+        /// The transmit error counter reached the warning level.
+        pub const TX_WARNING: u8 = 0x08;
+        /// The receive error counter reached error passive (128).
+        pub const RX_PASSIVE: u8 = 0x10;
+        /// The transmit error counter reached error passive.
+        pub const TX_PASSIVE: u8 = 0x20;
+        /// Back to error active.
+        pub const ACTIVE: u8 = 0x40;
+    }
+}
+
 /// Why a structure could not be decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
