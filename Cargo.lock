@@ -84,6 +84,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
+name = "can-hal-bxcan"
+version = "0.1.0"
+dependencies = [
+ "can-hal-rs",
+ "critical-section",
+ "defmt 1.2.0",
+]
+
+[[package]]
+name = "can-hal-rs"
+version = "0.4.3"
+
+[[package]]
 name = "cc"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -568,6 +581,8 @@ dependencies = [
 name = "ferrocan"
 version = "0.1.0"
 dependencies = [
+ "can-hal-bxcan",
+ "can-hal-rs",
  "cortex-m",
  "cortex-m-rt",
  "defmt 1.2.0",

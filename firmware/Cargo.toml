@@ -7,11 +7,28 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# Bare metal: there is no test harness on the target.
+[lib]
+test = false
+bench = false
+
+[[bin]]
+name = "ferrocan"
+test = false
+bench = false
+
+[[example]]
+name = "loopback"
+test = false
+bench = false
+
 [features]
 # Boards: build with exactly one, through its cargo alias (.cargo/config.toml).
 nucleo-f072rb = ["embassy-stm32/stm32f072rb"]
 
 [dependencies]
+can-hal = { version = "0.4.3", path = "../../can-hal-rs/can-hal", package = "can-hal-rs", default-features = false }
+can-hal-bxcan = { path = "../can-hal-bxcan", features = ["defmt"] }
 embassy-stm32 = { version = "0.6.0", features = ["defmt", "memory-x", "time-driver-any", "unstable-pac"] }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "defmt"] }
 embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime", "tick-hz-32_768"] }
