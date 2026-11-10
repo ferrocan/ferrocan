@@ -1,0 +1,13 @@
+[package]
+name = "gs_usb_protocol"
+description = "The gs_usb USB to CAN protocol (Geschwister Schneider, candleLight, Linux's gs_usb): requests, structures and frames"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["can", "gs_usb", "candlelight", "usb", "no-std"]
+categories = ["embedded", "hardware-support", "no-std"]
+publish = false
+
+[lints]
+workspace = true

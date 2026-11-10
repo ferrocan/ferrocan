@@ -68,6 +68,15 @@ impl<T> Outstanding<T> {
         Some(entry.mailbox)
     }
 
+    /// Notes that every unfinished transmission is to be aborted, returning
+    /// their mailboxes.
+    pub(crate) fn abort_unfinished(&mut self) -> impl Iterator<Item = u8> + '_ {
+        self.iter_mut().filter(|e| e.outcome.is_none()).map(|e| {
+            e.abort_requested = true;
+            e.mailbox
+        })
+    }
+
     /// The mailboxes of the transmissions still unfinished.
     pub(crate) fn unfinished(&mut self) -> impl Iterator<Item = u8> + '_ {
         self.iter_mut().filter(|e| e.outcome.is_none()).map(|e| e.mailbox)

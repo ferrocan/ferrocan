@@ -13,8 +13,9 @@ use embassy_stm32::Config;
 use embassy_stm32::Peri;
 use embassy_stm32::gpio::{AfType, Flex, Level, Output, OutputType, Pull, Speed};
 use embassy_stm32::interrupt::typelevel::{Binding, CEC_CAN, Handler, Interrupt};
-use embassy_stm32::peripherals::CAN;
+use embassy_stm32::peripherals::{CAN, USB};
 use embassy_stm32::rcc::{self, Hsi48Config, Sysclk};
+use embassy_stm32::usb;
 
 #[cfg(not(any(feature = "nucleo-f072rb", feature = "disco-f072b")))]
 compile_error!("Build for a board, through its cargo alias, such as `cargo build-disco-f072b`.");
@@ -47,6 +48,9 @@ impl Clock for EmbassyClock {
     }
 }
 
+/// The CAN channel, as this firmware makes it.
+pub type CanChannel = can_hal_bxcan::Can<EmbassyClock, CAN_EVENTS>;
+
 /// The CAN channel's shared state.
 pub static CAN_STATE: State<EmbassyClock, CAN_EVENTS> = State::new();
 
@@ -61,6 +65,7 @@ impl Handler<CEC_CAN> for CanInterrupt {
 
 embassy_stm32::bind_interrupts!(struct Irqs {
     CEC_CAN => CanInterrupt;
+    USB => usb::InterruptHandler<USB>;
 });
 
 /// The board's peripherals, as the firmware uses them.
@@ -71,6 +76,8 @@ pub struct Board {
     /// `can_hal_bxcan::Can::new` with [`CAN_STATE`], then
     /// [`unmask_can_interrupt`].
     pub can: Peripheral,
+    /// The USB device controller, on PA11 and PA12.
+    pub usb: usb::Driver<'static, USB>,
     /// Held so that nothing else takes the controller or its pins.
     _can_parts: (Peri<'static, CAN>, Flex<'static>, Flex<'static>),
 }
@@ -103,6 +110,7 @@ impl Board {
             led: Output::new(p.PA5, Level::Low, Speed::Low),
             // SAFETY: the board holds the controller, so nothing else uses it.
             can: unsafe { Peripheral::new(embassy_stm32::pac::CAN.as_ptr() as usize) },
+            usb: usb::Driver::new(p.USB, Irqs, p.PA12, p.PA11),
             _can_parts: (can, rx, tx),
         }
     }
@@ -117,6 +125,7 @@ impl Board {
             led: Output::new(p.PC6, Level::Low, Speed::Low),
             // SAFETY: the board holds the controller, so nothing else uses it.
             can: unsafe { Peripheral::new(embassy_stm32::pac::CAN.as_ptr() as usize) },
+            usb: usb::Driver::new(p.USB, Irqs, p.PA12, p.PA11),
             _can_parts: (can, rx, tx),
         }
     }

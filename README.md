@@ -18,14 +18,23 @@ the frame is on the bus rather than when it is queued.
   sent when the controller says it was acknowledged, in bus order with the
   frames received. It uses the confirmed-transmission traits on our fork's
   `aeolionics` branch, checked out beside this repository.
+- `gs_usb_protocol`: the gs_usb wire format (requests, structures, host
+  frames), for both device and host, with no dependencies.
 
 # Status
 
-On the NUCLEO-F072RB the board boots on its 48 MHz internal oscillator and
-`can-hal-bxcan` passes its loopback example: every kind of classic frame
-(standard and extended, data and remote, DLC 0 to 15) is received back
-unchanged and reported sent, and reports keep their order through an abort.
-Next: USB as a gs_usb device.
+On the NUCLEO-F072RB and the 32F072BDISCOVERY, `can-hal-bxcan` passes its
+loopback example: every kind of classic frame (standard and extended, data and
+remote, DLC 0 to 15) is received back unchanged and reported sent, and reports
+keep their order through an abort.
+
+On the Discovery, whose USB USER connector is the F072's own USB, the firmware
+is a gs_usb device that Linux's `gs_usb` binds to. In loopback, `cansend`
+frames of every kind come back echoed and received, and `cangen` bursts of
+2000 frames at 0.3 ms intervals arrive complete, each echo sent when the
+controller reports the frame acknowledged.
+
+Not yet: error frames for bus state, DFU detach, a real bus.
 
 # Building
 

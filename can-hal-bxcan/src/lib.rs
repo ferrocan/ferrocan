@@ -199,20 +199,7 @@ impl<C: Clock, const N: usize> Can<C, N> {
         // Out of sleep, into initialisation.
         r.mcr.modify(|mcr| (mcr & !MCR_SLEEP) | MCR_INRQ);
         wait_for(r, MSR_INAK | MSR_SLAK, MSR_INAK)?;
-
-        // Keep the debug freeze bit (16) as it is; transmit in request order;
-        // stamp frames with the bit-time counter, to put them in bus order.
-        let keep = r.mcr.read() & (1 << 16);
-        let nart = if config.retransmit { 0 } else { MCR_NART };
-        r.mcr.write(keep | MCR_INRQ | MCR_TXFP | MCR_TTCM | nart);
-
-        let mode = match config.mode {
-            Mode::Normal => 0,
-            Mode::Silent => BTR_SILM,
-            Mode::Loopback => BTR_LBKM,
-            Mode::SilentLoopback => BTR_SILM | BTR_LBKM,
-        };
-        r.btr.write(config.timing.btr() | mode);
+        configure(r, config);
 
         // Filter bank 0: a 32-bit mask of 0, passing everything to FIFO 0.
         r.fmr.modify(|fmr| fmr | FMR_FINIT);
@@ -238,6 +225,48 @@ impl<C: Clock, const N: usize> Can<C, N> {
 
     fn registers(&self) -> &RegisterBlock {
         self.regs.get()
+    }
+
+    /// Stops the controller: aborts the transmissions outstanding, whose
+    /// reports follow (`Aborted`, or `Sent` if a frame was already on its
+    /// way), and enters initialisation mode, leaving the bus. [`start`](Self::start)
+    /// rejoins it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InitTimeout`] if the controller doesn't enter initialisation
+    /// mode.
+    pub fn stop(&mut self) -> Result<(), Error> {
+        let regs = self.regs;
+        self.state.with(|inner| {
+            for mailbox in inner.outstanding.abort_unfinished() {
+                regs.get().tsr.write(tsr_abrq(usize::from(mailbox)));
+            }
+        });
+        // A mailbox empties once its frame is aborted, or sent.
+        let r = self.registers();
+        let empty = tsr_tme(0) | tsr_tme(1) | tsr_tme(2);
+        for _ in 0..MODE_CHANGE_POLLS {
+            if r.tsr.read() & empty == empty {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        r.mcr.modify(|mcr| mcr | MCR_INRQ);
+        wait_for(r, MSR_INAK, MSR_INAK)
+    }
+
+    /// Stops the controller if it is running and sets it up afresh with
+    /// `config`, leaving it stopped: then [`start`](Self::start) it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InitTimeout`] if the controller doesn't enter initialisation
+    /// mode.
+    pub fn reconfigure(&mut self, config: Config) -> Result<(), Error> {
+        self.stop()?;
+        configure(self.registers(), config);
+        Ok(())
     }
 
     /// Leaves initialisation mode. The controller joins the bus once it has
@@ -268,6 +297,23 @@ impl<C: Clock, const N: usize> Can<C, N> {
         })
         .await
     }
+}
+
+/// Writes `config` to the controller, which must be in initialisation mode.
+fn configure(r: &RegisterBlock, config: Config) {
+    // Keep the debug freeze bit (16) as it is; transmit in request order;
+    // stamp frames with the bit-time counter, to put them in bus order.
+    let keep = r.mcr.read() & (1 << 16);
+    let nart = if config.retransmit { 0 } else { MCR_NART };
+    r.mcr.write(keep | MCR_INRQ | MCR_TXFP | MCR_TTCM | nart);
+
+    let mode = match config.mode {
+        Mode::Normal => 0,
+        Mode::Silent => BTR_SILM,
+        Mode::Loopback => BTR_LBKM,
+        Mode::SilentLoopback => BTR_SILM | BTR_LBKM,
+    };
+    r.btr.write(config.timing.btr() | mode);
 }
 
 /// Polls MSR until its `mask` bits are `value`.
