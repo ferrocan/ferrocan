@@ -1,15 +1,19 @@
-# One alias per board: each names its target and feature. The firmware
-# builds for one board at a time; there is no default target, so that the
-# host-side crates still build and test natively.
+# One alias per board: each names its target, its feature and its debug
+# probe. The firmware builds for one board at a time; there is no default
+# target, so that the host-side crates still build and test natively.
 [alias]
 build-nucleo-f072rb = "build -p ferrocan --target thumbv6m-none-eabi --features nucleo-f072rb"
-run-nucleo-f072rb = "run -p ferrocan --target thumbv6m-none-eabi --features nucleo-f072rb"
+run-nucleo-f072rb = ["run", "--config", "env.PROBE_RS_PROBE='0483:374b'", "-p", "ferrocan", "--target", "thumbv6m-none-eabi", "--features", "nucleo-f072rb"]
 clippy-nucleo-f072rb = "clippy -p ferrocan --target thumbv6m-none-eabi --features nucleo-f072rb"
+build-disco-f072b = "build -p ferrocan --target thumbv6m-none-eabi --features disco-f072b"
+run-disco-f072b = ["run", "--config", "env.PROBE_RS_PROBE='0483:3748'", "-p", "ferrocan", "--target", "thumbv6m-none-eabi", "--features", "disco-f072b"]
+clippy-disco-f072b = "clippy -p ferrocan --target thumbv6m-none-eabi --features disco-f072b"
 
-# The Nucleo's on-board ST-LINK V2-1, named so that other probes on the
-# bench are left alone.
+# Flash with probe-rs through the board's on-board ST-LINK, which each run
+# alias names (PROBE_RS_PROBE: the Nucleo's V2-1 is 0483:374b, the
+# Discovery's V2 0483:3748), so that other probes on the bench are left alone.
 [target.thumbv6m-none-eabi]
-runner = "probe-rs run --chip STM32F072RB --probe 0483:374b"
+runner = "probe-rs run --chip STM32F072RB"
 
 [env]
 DEFMT_LOG = "debug"

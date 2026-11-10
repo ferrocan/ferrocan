@@ -16,8 +16,10 @@ use embassy_stm32::interrupt::typelevel::{Binding, CEC_CAN, Handler, Interrupt};
 use embassy_stm32::peripherals::CAN;
 use embassy_stm32::rcc::{self, Hsi48Config, Sysclk};
 
-#[cfg(not(any(feature = "nucleo-f072rb")))]
-compile_error!("Build for a board, through its cargo alias, such as `cargo build-nucleo-f072rb`.");
+#[cfg(not(any(feature = "nucleo-f072rb", feature = "disco-f072b")))]
+compile_error!("Build for a board, through its cargo alias, such as `cargo build-disco-f072b`.");
+#[cfg(all(feature = "nucleo-f072rb", feature = "disco-f072b"))]
+compile_error!("Build for one board at a time.");
 
 /// The CAN controller's clock, APB1: the 48 MHz system clock undivided.
 pub const CAN_CLOCK_HZ: u32 = 48_000_000;
@@ -99,6 +101,20 @@ impl Board {
         let (can, rx, tx) = can_parts(p.CAN, Flex::new(p.PB8), Flex::new(p.PB9), Irqs);
         Self {
             led: Output::new(p.PA5, Level::Low, Speed::Low),
+            // SAFETY: the board holds the controller, so nothing else uses it.
+            can: unsafe { Peripheral::new(embassy_stm32::pac::CAN.as_ptr() as usize) },
+            _can_parts: (can, rx, tx),
+        }
+    }
+
+    /// 32F072BDISCOVERY (MB1076): LED LD3 (red) on PC6, its USB USER connector on
+    /// PA11 and PA12, no crystal; CAN RX on PB8 and TX on PB9, as on the
+    /// Nucleo and CANable-style adapters.
+    #[cfg(feature = "disco-f072b")]
+    fn take(p: embassy_stm32::Peripherals) -> Self {
+        let (can, rx, tx) = can_parts(p.CAN, Flex::new(p.PB8), Flex::new(p.PB9), Irqs);
+        Self {
+            led: Output::new(p.PC6, Level::Low, Speed::Low),
             // SAFETY: the board holds the controller, so nothing else uses it.
             can: unsafe { Peripheral::new(embassy_stm32::pac::CAN.as_ptr() as usize) },
             _can_parts: (can, rx, tx),

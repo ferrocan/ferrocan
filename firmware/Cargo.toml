@@ -25,6 +25,7 @@ bench = false
 [features]
 # Boards: build with exactly one, through its cargo alias (.cargo/config.toml).
 nucleo-f072rb = ["embassy-stm32/stm32f072rb"]
+disco-f072b = ["embassy-stm32/stm32f072rb"]
 
 [dependencies]
 can-hal = { version = "0.4.3", path = "../../can-hal-rs/can-hal", package = "can-hal-rs", default-features = false }
