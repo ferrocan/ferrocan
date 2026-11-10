@@ -1,0 +1,15 @@
+# One alias per board: each names its target and feature. The firmware
+# builds for one board at a time; there is no default target, so that the
+# host-side crates still build and test natively.
+[alias]
+build-nucleo-f072rb = "build -p ferrocan --target thumbv6m-none-eabi --features nucleo-f072rb"
+run-nucleo-f072rb = "run -p ferrocan --target thumbv6m-none-eabi --features nucleo-f072rb"
+clippy-nucleo-f072rb = "clippy -p ferrocan --target thumbv6m-none-eabi --features nucleo-f072rb"
+
+# The Nucleo's on-board ST-LINK V2-1, named so that other probes on the
+# bench are left alone.
+[target.thumbv6m-none-eabi]
+runner = "probe-rs run --chip STM32F072RB --probe 0483:374b"
+
+[env]
+DEFMT_LOG = "debug"

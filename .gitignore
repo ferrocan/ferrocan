@@ -1,0 +1,7 @@
+/target
+
+# IDEs and desktop files
+.idea/
+.vscode/
+*.iml
+.DS_Store
