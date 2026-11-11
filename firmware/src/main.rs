@@ -41,10 +41,16 @@ const DFU_INTERFACE_GUIDS: &[&str] = &["{02abe934-d944-4a48-b2ea-67095526777d}"]
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
-    // Before anything is set up: a DFU detach restarts the device here.
+    // Before anything is set up: a start other than straight out of a reset
+    // (the bootloader's jump) restarts from one, and a DFU detach, which
+    // resets, goes on into the bootloader.
+    dfu::restart_unless_out_of_reset();
     dfu::enter_bootloader_if_requested();
     let mut board = Board::init();
     info!("ferrocan {} up", env!("CARGO_PKG_VERSION"));
+    if let Some(found) = dfu::found_at_start() {
+        info!("restarted, not having started out of a reset: {}", found);
+    }
 
     // The channel waits, stopped, for the host's bit timing and start.
     let mut can = board.can;

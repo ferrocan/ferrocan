@@ -10,6 +10,14 @@
 //! The request to the bootloader survives a reset in RAM that the runtime
 //! leaves uninitialised; [`enter_bootloader_if_requested`], first thing in
 //! `main`, jumps there before any peripheral is set up.
+//!
+//! The other way, the bootloader starts new firmware (`dfu-util`'s `:leave`)
+//! by jumping to it, leaving the chip as it had it: on the STM32G431, HSI16
+//! trimmed away from its default, so that CAN's bit rate is off and no other
+//! node understands it. So the firmware only runs straight out of a reset:
+//! [`restart_unless_out_of_reset`], first in `main`, restarts it with a
+//! system reset when it finds otherwise, and keeps what it found for
+//! [`found_at_start`] to log.
 
 use core::mem::MaybeUninit;
 use core::ptr::addr_of_mut;
@@ -21,7 +29,7 @@ use embassy_usb::Handler;
 use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestType};
 use embassy_usb::types::InterfaceNumber;
 
-use crate::board::BOOTLOADER;
+use crate::board::{BOOTLOADER, StartState, clear_reset_flags};
 
 /// The DFU class (application specific), subclass (DFU) and protocol
 /// (runtime) of the interface.
@@ -54,6 +62,13 @@ const BOOTLOADER_REQUESTED: u32 = 0x4446_5521;
 #[unsafe(link_section = ".uninit.FERROCAN_DFU")]
 static mut REQUEST: MaybeUninit<u32> = MaybeUninit::uninit();
 
+/// The value in [`LEFT`]'s first word when the firmware restarted itself
+/// because it didn't start out of a reset, and the rest is what it found.
+const RESTARTED: u32 = 0x4C45_4654;
+
+#[unsafe(link_section = ".uninit.FERROCAN_LEFT")]
+static mut LEFT: MaybeUninit<(u32, StartState)> = MaybeUninit::uninit();
+
 /// Restarts the device in the ROM bootloader.
 pub fn reboot_into_bootloader() -> ! {
     // SAFETY: nothing else touches REQUEST, and it is plain RAM.
@@ -74,7 +89,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 }
 
 /// If the last reset was [`reboot_into_bootloader`]'s, jumps to the ROM
-/// bootloader. Call it first in `main`, before any peripheral is set up, so
+/// bootloader. Call it in `main` straight after
+/// [`restart_unless_out_of_reset`], before any peripheral is set up, so
 /// that the bootloader starts from the chip's reset state.
 pub fn enter_bootloader_if_requested() {
     let request = addr_of_mut!(REQUEST).cast::<u32>();
@@ -89,6 +105,37 @@ pub fn enter_bootloader_if_requested() {
         // are the bootloader's stack pointer and reset vector; nothing has
         // been set up that it would mind.
         unsafe { cortex_m::asm::bootload(BOOTLOADER as *const u32) }
+    }
+}
+
+/// Unless the firmware started straight out of a reset, restarts it with a
+/// system reset, keeping what it found for [`found_at_start`]; otherwise
+/// clears the reset flags, so that the next start without a reset finds
+/// none. Call it first in `main`, before any peripheral is set up.
+pub fn restart_unless_out_of_reset() {
+    let state = StartState::read();
+    if state.not_out_of_reset() {
+        // SAFETY: nothing else touches LEFT, and it is plain RAM.
+        unsafe { addr_of_mut!(LEFT).write(MaybeUninit::new((RESTARTED, state))) };
+        SCB::sys_reset()
+    }
+    clear_reset_flags();
+}
+
+/// What the firmware found at start, if it restarted itself because that
+/// wasn't straight out of a reset; then not again until the next time.
+pub fn found_at_start() -> Option<StartState> {
+    let left = addr_of_mut!(LEFT).cast::<(u32, StartState)>();
+    // SAFETY: LEFT is RAM that the runtime leaves as the last reset found
+    // it, and every bit pattern is a valid (u32, StartState), all of whose
+    // fields are u32s; only a first word of RESTARTED says the rest is what
+    // restart_unless_out_of_reset found.
+    unsafe {
+        let (marker, state) = left.read_volatile();
+        (marker == RESTARTED).then(|| {
+            (*left).0 = 0;
+            state
+        })
     }
 }
 
