@@ -18,7 +18,7 @@
 //! On success the green LED (LD2) blinks slowly; on a failure, fast.
 //!
 //! ```sh
-//! cargo run-nucleo-g431kb-loopback
+//! cargo run-mcan-loopback
 //! ```
 
 #![no_std]

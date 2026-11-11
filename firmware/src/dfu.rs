@@ -84,11 +84,7 @@ pub fn enter_bootloader_if_requested() {
     if unsafe { request.read_volatile() } == BOOTLOADER_REQUESTED {
         // SAFETY: as above; cleared so that the next reset runs the firmware.
         unsafe { request.write_volatile(0) };
-        // The Cortex-M0 has no vector table offset register: its vectors
-        // are at address 0, so system memory must be mapped there, or the
-        // bootloader's interrupts would run this firmware's handlers.
-        embassy_stm32::pac::RCC.apb2enr().modify(|w| w.set_syscfgen(true));
-        embassy_stm32::pac::SYSCFG.cfgr1().modify(|w| w.set_mem_mode(embassy_stm32::pac::syscfg::vals::MemMode::SYSTEM_FLASH));
+        crate::board::map_system_memory();
         // SAFETY: BOOTLOADER is the chip's system memory, whose first words
         // are the bootloader's stack pointer and reset vector; nothing has
         // been set up that it would mind.

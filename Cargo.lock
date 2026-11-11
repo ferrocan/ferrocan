@@ -647,6 +647,7 @@ name = "ferrocan"
 version = "0.1.0"
 dependencies = [
  "can-hal-bxcan",
+ "can-hal-mcan",
  "can-hal-rs",
  "cortex-m",
  "cortex-m-rt",

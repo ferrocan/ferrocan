@@ -19,14 +19,27 @@ bench = false
 
 [[example]]
 name = "loopback"
+required-features = ["bxcan"]
 test = false
 bench = false
 
 [features]
 # Boards: build with exactly one, through its cargo alias (.cargo/config.toml).
-nucleo-f072rb = ["embassy-stm32/stm32f072rb", "dep:panic-probe"]
-disco-f072b = ["embassy-stm32/stm32f072rb", "dep:panic-probe"]
-sh-c30a = ["embassy-stm32/stm32f072cb", "panic-dfu"]
+nucleo-f072rb = ["bxcan", "embassy-stm32/stm32f072rb", "dep:panic-probe"]
+disco-f072b = ["bxcan", "embassy-stm32/stm32f072rb", "dep:panic-probe"]
+sh-c30a = ["bxcan", "embassy-stm32/stm32f072cb", "panic-dfu"]
+# The NUCLEO-G431KB has no USB connector or CAN pins: it runs the firmware
+# under a probe as far as waiting for a host, to catch a panic at start
+# before an adapter with no probe is flashed.
+nucleo-g431kb = ["fdcan", "embassy-stm32/stm32g431kb", "dep:panic-probe"]
+sh-c31a = ["fdcan", "embassy-stm32/stm32g431c8", "panic-dfu"]
+# The CAN controller, which the board's chip has: bxCAN (STM32F0) or FDCAN
+# (STM32G4).
+bxcan = ["dep:can-hal-bxcan"]
+# The STM32G4 boards also set the stack pointer and vector table offset at
+# reset: the ROM bootloader's DFU `:leave` jumps to the firmware with its own
+# still in place.
+fdcan = ["dep:can-hal-mcan", "cortex-m-rt/set-sp", "cortex-m-rt/set-vtor"]
 # On a panic, restart in the ROM bootloader, so that a board with no debug
 # probe can be reflashed over USB. Boards with a probe use panic-probe
 # instead, for its backtrace.
@@ -34,7 +47,8 @@ panic-dfu = []
 
 [dependencies]
 can-hal = { version = "0.4.3", path = "../../can-hal-rs/can-hal", package = "can-hal-rs", default-features = false }
-can-hal-bxcan = { path = "../can-hal-bxcan", features = ["defmt"] }
+can-hal-bxcan = { path = "../can-hal-bxcan", features = ["defmt"], optional = true }
+can-hal-mcan = { path = "../can-hal-mcan", features = ["defmt"], optional = true }
 gs_usb_protocol = { path = "../gs_usb_protocol" }
 embassy-stm32 = { version = "0.6.0", features = ["defmt", "memory-x", "time-driver-tim2", "unstable-pac"] }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "defmt"] }

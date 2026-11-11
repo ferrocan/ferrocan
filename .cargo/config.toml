@@ -11,10 +11,15 @@ clippy-disco-f072b = "clippy -p ferrocan --target thumbv6m-none-eabi --features 
 # The SH-C30A has no debug probe: flash it over USB with dfu-util (README).
 build-sh-c30a = "build -p ferrocan --release --target thumbv6m-none-eabi --features sh-c30a"
 clippy-sh-c30a = "clippy -p ferrocan --target thumbv6m-none-eabi --features sh-c30a"
+build-nucleo-g431kb = "build -p ferrocan --target thumbv7em-none-eabihf --features nucleo-g431kb"
+run-nucleo-g431kb = ["run", "--config", "env.PROBE_RS_PROBE='0483:374e'", "-p", "ferrocan", "--target", "thumbv7em-none-eabihf", "--features", "nucleo-g431kb"]
+clippy-nucleo-g431kb = "clippy -p ferrocan --target thumbv7em-none-eabihf --features nucleo-g431kb"
+# The SH-C31A: dfu-util over USB (README), or SWD on its H1 header.
+build-sh-c31a = "build -p ferrocan --release --target thumbv7em-none-eabihf --features sh-c31a"
+clippy-sh-c31a = "clippy -p ferrocan --target thumbv7em-none-eabihf --features sh-c31a"
 # can-hal-mcan's bench tests on the NUCLEO-G431KB (its STLINK-V3 is 0483:374e).
-build-nucleo-g431kb = "build -p nucleo-g431kb --target thumbv7em-none-eabihf"
-run-nucleo-g431kb-loopback = ["run", "--config", "env.PROBE_RS_PROBE='0483:374e'", "-p", "nucleo-g431kb", "--target", "thumbv7em-none-eabihf", "--bin", "loopback"]
-clippy-nucleo-g431kb = "clippy -p nucleo-g431kb --target thumbv7em-none-eabihf"
+run-mcan-loopback = ["run", "--config", "env.PROBE_RS_PROBE='0483:374e'", "-p", "nucleo-g431kb", "--target", "thumbv7em-none-eabihf", "--bin", "loopback"]
+clippy-mcan-bench = "clippy -p nucleo-g431kb --target thumbv7em-none-eabihf"
 
 # Flash with probe-rs through the board's on-board ST-LINK, which each run
 # alias names (PROBE_RS_PROBE: the Nucleo's V2-1 is 0483:374b, the

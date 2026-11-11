@@ -5,10 +5,11 @@
 //! ferrocan: `gs_usb` (candleLight-compatible) USB to CAN adapter firmware.
 //!
 //! The library holds what the firmware and its examples share: the board,
-//! the `gs_usb` device and DFU detach.
+//! the channel the bridge drives, the `gs_usb` device and DFU detach.
 
 #![no_std]
 
 pub mod board;
+pub mod channel;
 pub mod dfu;
 pub mod gs_usb;

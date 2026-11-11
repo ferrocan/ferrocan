@@ -16,8 +16,7 @@ use core::cell::RefCell;
 use core::future::pending as never;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use can_hal::{BusState, BusStatus, CanFrame, CanId, ConfirmedTransmit, ErrorCounters, Event, Outcome, Recover, Statistics, TransmitId};
-use can_hal_bxcan::{BitTiming, BusError, Config, Mode, Status};
+use can_hal::{BusState, BusStatus, CanFrame, CanId, ErrorCounters, Event, Frame, Outcome, TransmitId};
 use defmt::{debug, info, warn};
 use embassy_futures::select::{Either, Either4, select, select4};
 use embassy_sync::blocking_mutex::Mutex;
@@ -29,7 +28,7 @@ use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestT
 use embassy_usb::driver::{EndpointError, EndpointIn, EndpointOut};
 use gs_usb_protocol::{BtConst, CLASSIC_TS_LEN, DeviceBittiming, DeviceConfig, DeviceMode, DeviceState, ECHO_ID_RX, HostFrame, Request as GsRequest, can_err, can_id, decode_u32, feature, frame_flag, identify, mode, state};
 
-use crate::board::{CAN_CLOCK_HZ, CanChannel};
+use crate::channel::{BusError, Channel, Fault, Mode, Settings, Timing};
 
 /// The features the device offers.
 pub const FEATURES: u32 = MODE_FLAGS | feature::IDENTIFY | feature::GET_STATE;
@@ -50,15 +49,15 @@ const HW_VERSION: u32 = 1;
 
 /// What the host asked the channel to do.
 pub enum Command {
-    /// Join the bus with this configuration, stamping frames or not.
-    Start { config: Config, timestamps: bool },
+    /// Join the bus with these settings, stamping frames or not.
+    Start { settings: Settings, timestamps: bool },
     /// Leave the bus.
     Reset,
 }
 
 /// What the control handler and the bridge share.
 pub struct Shared {
-    timing: Mutex<CriticalSectionRawMutex, RefCell<Option<BitTiming>>>,
+    timing: Mutex<CriticalSectionRawMutex, RefCell<Option<Timing>>>,
     command: Signal<CriticalSectionRawMutex, Command>,
     /// Whether the channel is on the bus, as the bridge last left it.
     running: AtomicBool,
@@ -119,17 +118,18 @@ impl Default for Shared {
 /// The one channel's shared state.
 pub static SHARED: Shared = Shared::new();
 
-/// Answers the `gs_usb` vendor requests to interface 0.
-pub struct Control {
+/// Answers the `gs_usb` vendor requests to interface 0, for a channel of type
+/// `C`.
+pub struct Control<C: Channel> {
     shared: &'static Shared,
-    status: Status,
+    status: C::Status,
 }
 
-impl Control {
+impl<C: Channel> Control<C> {
     /// A handler sharing `shared` with the bridge, which reads the channel's
     /// error state from `status`.
     #[must_use]
-    pub const fn new(shared: &'static Shared, status: Status) -> Self {
+    pub const fn new(shared: &'static Shared, status: C::Status) -> Self {
         Self { shared, status }
     }
 
@@ -168,9 +168,15 @@ impl Control {
             (false, true) => Mode::Loopback,
             (true, true) => Mode::SilentLoopback,
         };
-        let config = Config::new(timing).with_mode(mode).with_retransmit(flags & feature::ONE_SHOT == 0).with_bus_errors(flags & feature::BERR_REPORTING != 0);
+        let settings = Settings {
+            nominal: timing,
+            data: None,
+            mode,
+            retransmit: flags & feature::ONE_SHOT == 0,
+            bus_errors: flags & feature::BERR_REPORTING != 0,
+        };
         self.shared.command.signal(Command::Start {
-            config,
+            settings,
             timestamps: flags & feature::HW_TIMESTAMP != 0,
         });
         OutResponse::Accepted
@@ -182,7 +188,7 @@ fn is_gs_usb(req: &Request) -> bool {
     req.request_type == RequestType::Vendor && req.recipient == Recipient::Interface && req.index == 0
 }
 
-impl Handler for Control {
+impl<C: Channel> Handler for Control<C> {
     /// On USB suspend the channel leaves the bus, as candleLight's does: the
     /// host can't take its frames. Linux re-probes the device on resume.
     fn suspended(&mut self, suspended: bool) {
@@ -200,12 +206,8 @@ impl Handler for Control {
             Some(GsRequest::HostFormat) => OutResponse::Accepted,
             Some(GsRequest::Bittiming) if req.value == 0 => {
                 let Ok(bt) = DeviceBittiming::decode(data) else { return Some(OutResponse::Rejected) };
-                let timing = (|| {
-                    let seg1 = u8::try_from(bt.prop_seg.checked_add(bt.phase_seg1)?).ok()?;
-                    BitTiming::new(u16::try_from(bt.brp).ok()?, seg1, u8::try_from(bt.phase_seg2).ok()?, u8::try_from(bt.sjw).ok()?).ok()
-                })();
-                if let Some(timing) = timing {
-                    info!("gs_usb: bit timing {}: {} bit/s", timing, timing.bitrate(CAN_CLOCK_HZ));
+                if let Some(timing) = C::NOMINAL.timing(&bt) {
+                    info!("gs_usb: bit timing {}: {} bit/s", timing, bitrate::<C>(timing));
                     self.shared.timing.lock(|t| *t.borrow_mut() = Some(timing));
                     OutResponse::Accepted
                 } else {
@@ -242,14 +244,14 @@ impl Handler for Control {
             Some(GsRequest::BtConst) if req.value == 0 => InResponse::Accepted(
                 BtConst {
                     feature: FEATURES,
-                    fclk_can: CAN_CLOCK_HZ,
+                    fclk_can: C::CLOCK_HZ,
                     tseg1_min: 1,
-                    tseg1_max: 16,
+                    tseg1_max: u32::from(C::NOMINAL.tseg1_max),
                     tseg2_min: 1,
-                    tseg2_max: 8,
-                    sjw_max: 4,
+                    tseg2_max: u32::from(C::NOMINAL.tseg2_max),
+                    sjw_max: u32::from(C::NOMINAL.sjw_max),
                     brp_min: 1,
-                    brp_max: 1024,
+                    brp_max: u32::from(C::NOMINAL.brp_max),
                     brp_inc: 1,
                 }
                 .encode(buf),
@@ -270,6 +272,12 @@ impl Handler for Control {
             _ => InResponse::Rejected,
         })
     }
+}
+
+/// The bit rate `timing` gives from the channel's clock.
+fn bitrate<C: Channel>(timing: Timing) -> u32 {
+    let quanta = u32::from(timing.prescaler) * (1 + u32::from(timing.seg1) + u32::from(timing.seg2));
+    C::CLOCK_HZ / quanta
 }
 
 /// The device's microsecond timer, as `gs_usb` stamps frames: it wraps.
@@ -312,7 +320,7 @@ struct Pending {
 /// [`BUS_OFF_RESTART_DELAY`], and the host is told it restarted, as
 /// candleLight and Kvaser's adapters do; Linux's `gs_usb` has no restart of
 /// its own (`restart-ms` doesn't apply).
-pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &mut impl EndpointOut, shared: &Shared) -> ! {
+pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out: &mut impl EndpointOut, shared: &Shared) -> ! {
     let mut pending: [Option<Pending>; 3] = [const { None }; 3];
     let mut running = false;
     let mut timestamps = false;
@@ -349,11 +357,14 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
             Either4::First(Err(EndpointError::BufferOverflow)) => warn!("gs_usb: OUT transfer too long"),
             Either4::Second(Either::First(event)) => match event {
                 Event::Received(received) if running => {
-                    let mut host = from_can(received.frame(), ECHO_ID_RX);
+                    let Some(mut host) = from_frame(received.frame(), ECHO_ID_RX) else {
+                        warn!("gs_usb: an FD frame, not yet passed on");
+                        continue;
+                    };
                     host.timestamp_us = timestamps.then(|| micros(*received.timestamp()));
                     // Frames lost since the last one received: the host
                     // turns the flag into an overflow error frame.
-                    let now_lost = lost_frames(can);
+                    let now_lost = can.lost_frames();
                     if now_lost > lost {
                         host.flags |= frame_flag::OVERFLOW;
                         lost = now_lost;
@@ -364,7 +375,7 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
                 Event::Received(_) => {}
                 Event::Transmitted { id, outcome } => echo(ep_in, &mut in_buf, &mut pending, id, outcome, timestamps, shared).await,
                 Event::BusStateChanged(state) => {
-                    let counters = can.error_counters().unwrap_or(ErrorCounters { transmit: 0, receive: 0 });
+                    let counters = can.error_counters();
                     info!("gs_usb: bus {}, counters {}/{}", defmt::Debug2Format(&state), counters.transmit, counters.receive);
                     if running && state != bus {
                         report_state(ep_in, &mut in_buf, bus, state, counters, timestamps).await;
@@ -379,26 +390,25 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
             },
             Either4::Second(Either::Second(error)) => {
                 if running {
-                    let counters = can.error_counters().unwrap_or(ErrorCounters { transmit: 0, receive: 0 });
+                    let counters = can.error_counters();
                     let mut host = bus_error_frame(error, counters);
                     host.timestamp_us = timestamps.then(|| micros(Instant::now()));
                     write(ep_in, host.encode(&mut in_buf)).await;
                 }
             }
-            Either4::Third(Command::Start { config, timestamps: stamped }) => {
+            Either4::Third(Command::Start { settings, timestamps: stamped }) => {
                 stop(can, &mut pending, &mut running, shared);
                 recovery = Recovery::Idle;
-                match can.reconfigure(config) {
+                match can.start(&settings) {
                     Ok(()) => {
-                        can.start();
                         running = true;
                         shared.running.store(true, Ordering::Relaxed);
                         timestamps = stamped;
                         bus = BusState::ErrorActive;
-                        lost = lost_frames(can);
-                        info!("gs_usb: started, {}, timestamps {}", config.mode, timestamps);
+                        lost = can.lost_frames();
+                        info!("gs_usb: started, {}, timestamps {}", settings.mode, timestamps);
                     }
-                    Err(e) => warn!("gs_usb: can't configure the controller: {}", e),
+                    Err(e) => warn!("gs_usb: can't start the controller: {}", e),
                 }
             }
             Either4::Third(Command::Reset) => {
@@ -418,32 +428,34 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
 
 /// Hands a frame from the host to the channel, or, if this device can't send
 /// it, echoes it unsent so the host's slot is freed.
-async fn from_host(can: &mut CanChannel, ep_in: &mut impl EndpointIn, in_buf: &mut [u8; CLASSIC_TS_LEN], pending: &mut [Option<Pending>; 3], bytes: &[u8], timestamps: bool) {
+async fn from_host<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, in_buf: &mut [u8; CLASSIC_TS_LEN], pending: &mut [Option<Pending>; 3], bytes: &[u8], timestamps: bool) {
     let Ok(host) = HostFrame::decode(bytes) else {
         warn!("gs_usb: undecodable frame of {} bytes", bytes.len());
         return;
     };
-    let Some(frame) = to_can(&host) else {
-        warn!("gs_usb: unsupported frame, echoed unsent");
-        let mut echo = host;
-        echo.timestamp_us = timestamps.then(|| micros(Instant::now()));
-        write(ep_in, echo.encode(in_buf)).await;
-        return;
+    let sent = match to_frame(&host) {
+        Some(frame) => can.transmit(&frame),
+        None => Err(Fault::FdUnsupported),
     };
-    match can.try_transmit(&frame) {
+    match sent {
         Ok(id) => {
             if let Some(slot) = pending.iter_mut().find(|p| p.is_none()) {
                 *slot = Some(Pending { id, frame: host });
             }
         }
-        Err(e) => warn!("gs_usb: no room for a frame: {}", defmt::Debug2Format(&e)),
+        Err(e) => {
+            warn!("gs_usb: frame not sent ({}), echoed unsent", e);
+            let mut echo = host;
+            echo.timestamp_us = timestamps.then(|| micros(Instant::now()));
+            write(ep_in, echo.encode(in_buf)).await;
+        }
     }
 }
 
 /// The next step of an automatic recovery from bus-off, once its time has
 /// come: start it, or look whether it has finished and, if so, tell the host
 /// the channel restarted. [`Recovery::Idle`] once it has.
-async fn recover(can: &mut CanChannel, ep_in: &mut impl EndpointIn, in_buf: &mut [u8; CLASSIC_TS_LEN], recovery: Recovery, timestamps: bool) -> Recovery {
+async fn recover<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, in_buf: &mut [u8; CLASSIC_TS_LEN], recovery: Recovery, timestamps: bool) -> Recovery {
     match recovery {
         Recovery::Due(_) => {
             info!("gs_usb: recovering from bus-off");
@@ -452,8 +464,8 @@ async fn recover(can: &mut CanChannel, ep_in: &mut impl EndpointIn, in_buf: &mut
             }
             Recovery::Waiting(Instant::now() + RECOVERY_POLL)
         }
-        Recovery::Waiting(_) if can.bus_state().is_ok_and(|state| state != BusState::BusOff) => {
-            let counters = can.error_counters().unwrap_or(ErrorCounters { transmit: 0, receive: 0 });
+        Recovery::Waiting(_) if can.bus_state() != BusState::BusOff => {
+            let counters = can.error_counters();
             info!("gs_usb: recovered, counters {}/{}", counters.transmit, counters.receive);
             report_state(ep_in, in_buf, BusState::BusOff, BusState::ErrorActive, counters, timestamps).await;
             Recovery::Idle
@@ -501,7 +513,7 @@ fn bus_error_frame(error: BusError, counters: ErrorCounters) -> HostFrame {
         BusError::BitRecessive => data[2] = can_err::prot::BIT1,
         BusError::BitDominant => data[2] = can_err::prot::BIT0,
         BusError::Crc => data[3] = can_err::prot::LOC_CRC_SEQ,
-        _ => {}
+        BusError::Other => {}
     }
     data[6] = counters.transmit;
     data[7] = counters.receive;
@@ -514,12 +526,6 @@ fn bus_error_frame(error: BusError, counters: ErrorCounters) -> HostFrame {
         data,
         timestamp_us: None,
     }
-}
-
-/// The frames the channel has lost so far: dropped from its event queue, or
-/// overrun in the controller's receive FIFOs.
-fn lost_frames(can: &CanChannel) -> u64 {
-    can.statistics().map_or(0, |s| s.rx_dropped.unwrap_or(0) + s.rx_overruns.unwrap_or(0))
 }
 
 /// The error frame telling the host the bus state went from `from` to `to`,
@@ -561,7 +567,7 @@ fn error_frame(from: BusState, to: BusState, counters: ErrorCounters) -> HostFra
 
 /// Leaves the bus and forgets the frames awaiting reports: the host has
 /// forgotten them too.
-fn stop(can: &mut CanChannel, pending: &mut [Option<Pending>; 3], running: &mut bool, shared: &Shared) {
+fn stop<C: Channel>(can: &mut C, pending: &mut [Option<Pending>; 3], running: &mut bool, shared: &Shared) {
     if *running && let Err(e) = can.stop() {
         warn!("gs_usb: can't stop the controller: {}", e);
     }
@@ -578,7 +584,7 @@ async fn write(ep_in: &mut impl EndpointIn, bytes: &[u8]) {
 
 /// The CAN frame the host sent, if this device can send it: classic, not an
 /// error frame.
-fn to_can(host: &HostFrame) -> Option<CanFrame> {
+fn to_frame(host: &HostFrame) -> Option<Frame> {
     if host.can_id & can_id::ERR != 0 {
         return None;
     }
@@ -588,15 +594,17 @@ fn to_can(host: &HostFrame) -> Option<CanFrame> {
         CanId::new_standard(u16::try_from(host.can_id & can_id::SFF_MASK).ok()?)?
     };
     let dlc = usize::from(host.can_dlc);
-    if host.can_id & can_id::RTR != 0 {
+    let frame = if host.can_id & can_id::RTR != 0 {
         CanFrame::new_remote(id, dlc)
     } else {
         CanFrame::new_with_dlc(id, &host.data[..dlc.min(8)], dlc)
-    }
+    };
+    frame.map(Frame::Can)
 }
 
-/// The host's form of `frame`.
-fn from_can(frame: &CanFrame, echo_id: u32) -> HostFrame {
+/// The host's form of `frame`, if it is classic.
+fn from_frame(frame: &Frame, echo_id: u32) -> Option<HostFrame> {
+    let Frame::Can(frame) = frame else { return None };
     let mut can_id = match frame.id() {
         CanId::Standard(id) => u32::from(id),
         CanId::Extended(id) => id | can_id::EFF,
@@ -606,7 +614,7 @@ fn from_can(frame: &CanFrame, echo_id: u32) -> HostFrame {
     }
     let mut data = [0; 8];
     data[..frame.data().len()].copy_from_slice(frame.data());
-    HostFrame {
+    Some(HostFrame {
         echo_id,
         can_id,
         #[expect(clippy::cast_possible_truncation, reason = "a DLC is at most 15")]
@@ -615,5 +623,5 @@ fn from_can(frame: &CanFrame, echo_id: u32) -> HostFrame {
         flags: 0,
         data,
         timestamp_us: None,
-    }
+    })
 }
