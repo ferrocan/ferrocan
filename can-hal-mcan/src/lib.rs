@@ -322,6 +322,10 @@ impl<C: Clock, const N: usize> Can<C, N> {
     /// Stops the controller if it is running and sets it up afresh with
     /// `config`, leaving it stopped: then [`start`](Self::start) it.
     ///
+    /// A channel set up afresh counts as error active. The error counters
+    /// carry over, though, so if they still say otherwise, the first read of
+    /// the state after this reports the change.
+    ///
     /// # Errors
     ///
     /// [`Error::InitTimeout`] if the controller doesn't enter initialisation.
@@ -331,6 +335,7 @@ impl<C: Clock, const N: usize> Can<C, N> {
         self.state.with(|inner| {
             inner.report_bus_errors = config.bus_errors;
             inner.bus_error = None;
+            inner.bus_state = BusState::ErrorActive;
         });
         Ok(())
     }
