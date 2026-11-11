@@ -64,6 +64,7 @@ impl Board {
     /// SH-C31A.
     #[must_use]
     pub fn init() -> Self {
+        restore_hsi_trim();
         let mut config = embassy_stm32::Config::default();
         config.rcc.pll = Some(Pll {
             source: PllSource::HSI,
@@ -148,82 +149,20 @@ fn channel() -> CanChannel {
     can
 }
 
-/// The registers that tell whether the firmware started straight out of a
-/// reset, as it finds them before it sets anything up. The ROM bootloader
-/// starts new firmware (`dfu-util`'s `:leave`) by jumping to it, leaving the
-/// chip as it had it: HSI16 trimmed away from its default, for one, which
-/// puts every clock off, CAN's bit rate with them.
-#[derive(Clone, Copy)]
-pub struct StartState {
-    pub rcc_cr: u32,
-    pub rcc_icscr: u32,
-    pub rcc_cfgr: u32,
-    pub rcc_csr: u32,
-    pub syscfg_memrmp: u32,
-}
-
-/// `RCC_CSR`'s reset flags: low-power, window and independent watchdog,
-/// software, brown-out, pin and option byte loader.
-const RESET_FLAGS: u32 = 0x7F << 25;
-/// `RCC_CSR`'s remove-flags bit.
-const RMVF: u32 = 1 << 23;
 /// HSITRIM's value out of reset.
 const HSITRIM_DEFAULT: u32 = 64;
 
-impl StartState {
-    /// The registers as they are. A register whose peripheral has no clock
-    /// reads 0, as after a reset.
-    #[must_use]
-    pub fn read() -> Self {
-        use embassy_stm32::pac::{RCC, SYSCFG};
-        let rcc = RCC.as_ptr() as usize;
-        // SAFETY: RCC_ICSCR and RCC_CSR; reading them has no effect.
-        let (icscr, csr) = unsafe { (((rcc + 0x04) as *const u32).read_volatile(), ((rcc + 0x94) as *const u32).read_volatile()) };
-        Self {
-            rcc_cr: RCC.cr().read().0,
-            rcc_icscr: icscr,
-            rcc_cfgr: RCC.cfgr().read().0,
-            rcc_csr: csr,
-            syscfg_memrmp: SYSCFG.memrmp().read().0,
-        }
-    }
-
-    /// Whether the firmware didn't start out of a reset: no reset flag set
-    /// (the firmware clears them as it starts, see [`clear_reset_flags`]),
-    /// or the chip not as a reset leaves it, for when the bootloader was
-    /// itself entered from a reset: the PLL running, the system clock on
-    /// something other than HSI16, system memory mapped at 0, or HSI16
-    /// trimmed.
-    #[must_use]
-    pub const fn not_out_of_reset(&self) -> bool {
-        let no_reset = self.rcc_csr & RESET_FLAGS == 0;
-        let pll_on = self.rcc_cr & (1 << 24) != 0;
-        let not_hsi16 = (self.rcc_cfgr >> 2) & 0b11 != 0b01;
-        let system_memory = self.syscfg_memrmp & 0b111 != 0;
-        let trimmed = (self.rcc_icscr >> 24) & 0x7F != HSITRIM_DEFAULT;
-        no_reset || pll_on || not_hsi16 || system_memory || trimmed
-    }
-}
-
-/// Clears the reset flags, so that a start without a reset finds none.
-pub fn clear_reset_flags() {
-    let csr = (embassy_stm32::pac::RCC.as_ptr() as usize + 0x94) as *mut u32;
-    // SAFETY: RCC_CSR; RMVF clears the reset flags and nothing else.
-    unsafe { csr.write_volatile(csr.read_volatile() | RMVF) };
-}
-
-impl defmt::Format for StartState {
-    fn format(&self, f: defmt::Formatter) {
-        defmt::write!(
-            f,
-            "RCC_CR {=u32:#010x} RCC_ICSCR {=u32:#010x} RCC_CFGR {=u32:#010x} RCC_CSR {=u32:#010x} SYSCFG_MEMRMP {=u32:#010x}",
-            self.rcc_cr,
-            self.rcc_icscr,
-            self.rcc_cfgr,
-            self.rcc_csr,
-            self.syscfg_memrmp
-        );
-    }
+/// Sets HSI16's trim to its reset value. Embassy's clock setup doesn't set it,
+/// and ST's bootloader leaves it changed when it starts the firmware by its
+/// jump (`dfu-util`'s `:leave`), which runs every clock derived from HSI16
+/// fast, CAN's bit rate with them. ST lists the same fault for the
+/// `STM32G07x`'s bootloader V11.2 in `AN2606`, though not for the G431's.
+/// See [`crate::dfu`] on what else such a start inherits.
+fn restore_hsi_trim() {
+    let icscr = (embassy_stm32::pac::RCC.as_ptr() as usize + 0x04) as *mut u32;
+    // SAFETY: RCC_ICSCR; only HSITRIM (bits 30:24) changes, and nothing runs
+    // from HSI16 yet but the core, which a change of trim doesn't upset.
+    unsafe { icscr.write_volatile((icscr.read_volatile() & !(0x7F << 24)) | (HSITRIM_DEFAULT << 24)) };
 }
 
 /// Maps system memory at address 0, for the ROM bootloader, as ST advises

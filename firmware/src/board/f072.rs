@@ -62,6 +62,7 @@ impl Board {
     /// adapters such as the SH-C30A.
     #[must_use]
     pub fn init() -> Self {
+        restore_hsi_trim();
         let mut config = embassy_stm32::Config::default();
         let mut hsi48 = Hsi48Config::new();
         hsi48.sync_from_usb = true;
@@ -153,78 +154,20 @@ fn channel() -> CanChannel {
     can
 }
 
-/// The registers that tell whether the firmware started straight out of a
-/// reset, as it finds them before it sets anything up. The ROM bootloader
-/// starts new firmware (`dfu-util`'s `:leave`) by jumping to it, leaving the
-/// chip as it had it.
-#[derive(Clone, Copy)]
-pub struct StartState {
-    pub rcc_cr: u32,
-    pub rcc_cfgr: u32,
-    pub rcc_csr: u32,
-    pub syscfg_cfgr1: u32,
-}
-
-/// `RCC_CSR`'s reset flags: low-power, window and independent watchdog,
-/// software, power-on, pin and option byte loader.
-const RESET_FLAGS: u32 = 0x7F << 25;
-/// `RCC_CSR`'s remove-flags bit.
-const RMVF: u32 = 1 << 24;
 /// HSITRIM's value out of reset.
 const HSITRIM_DEFAULT: u32 = 16;
 
-impl StartState {
-    /// The registers as they are. A register whose peripheral has no clock
-    /// reads 0, as after a reset.
-    #[must_use]
-    pub fn read() -> Self {
-        use embassy_stm32::pac::{RCC, SYSCFG};
-        let csr = (RCC.as_ptr() as usize + 0x24) as *const u32;
-        Self {
-            rcc_cr: RCC.cr().read().0,
-            rcc_cfgr: RCC.cfgr().read().0,
-            // SAFETY: RCC_CSR; reading it has no effect.
-            rcc_csr: unsafe { csr.read_volatile() },
-            syscfg_cfgr1: SYSCFG.cfgr1().read().0,
-        }
-    }
-
-    /// Whether the firmware didn't start out of a reset: no reset flag set
-    /// (the firmware clears them as it starts, see [`clear_reset_flags`]),
-    /// or the chip not as a reset leaves it, for when the bootloader was
-    /// itself entered from a reset: the PLL running, the system clock on
-    /// something other than HSI, system memory mapped at 0 (where the
-    /// Cortex-M0, with no vector table offset register, would take the
-    /// bootloader's interrupt vectors), or HSI trimmed.
-    #[must_use]
-    pub const fn not_out_of_reset(&self) -> bool {
-        let no_reset = self.rcc_csr & RESET_FLAGS == 0;
-        let pll_on = self.rcc_cr & (1 << 24) != 0;
-        let not_hsi = (self.rcc_cfgr >> 2) & 0b11 != 0b00;
-        let system_memory = self.syscfg_cfgr1 & 0b11 != 0;
-        let trimmed = (self.rcc_cr >> 3) & 0x1F != HSITRIM_DEFAULT;
-        no_reset || pll_on || not_hsi || system_memory || trimmed
-    }
-}
-
-/// Clears the reset flags, so that a start without a reset finds none.
-pub fn clear_reset_flags() {
-    let csr = (embassy_stm32::pac::RCC.as_ptr() as usize + 0x24) as *mut u32;
-    // SAFETY: RCC_CSR; RMVF clears the reset flags and nothing else.
-    unsafe { csr.write_volatile(csr.read_volatile() | RMVF) };
-}
-
-impl defmt::Format for StartState {
-    fn format(&self, f: defmt::Formatter) {
-        defmt::write!(
-            f,
-            "RCC_CR {=u32:#010x} RCC_CFGR {=u32:#010x} RCC_CSR {=u32:#010x} SYSCFG_CFGR1 {=u32:#010x}",
-            self.rcc_cr,
-            self.rcc_cfgr,
-            self.rcc_csr,
-            self.syscfg_cfgr1
-        );
-    }
+/// Sets HSI's trim to its reset value, which Embassy's clock setup doesn't
+/// set, in case a bootloader that started the firmware by jumping to it left
+/// it changed, as the STM32G431's does. Nothing here runs from HSI once the
+/// clocks are set up (the system clock is HSI48, locked to USB), but its
+/// trim isn't ours to leave to chance. See [`crate::dfu`] on what else such
+/// a start inherits.
+fn restore_hsi_trim() {
+    let cr = embassy_stm32::pac::RCC.as_ptr().cast::<u32>();
+    // SAFETY: RCC_CR; only HSITRIM (bits 7:3) changes, and nothing runs from
+    // HSI yet but the core, which a change of trim doesn't upset.
+    unsafe { cr.write_volatile((cr.read_volatile() & !(0x1F << 3)) | (HSITRIM_DEFAULT << 3)) };
 }
 
 /// Maps system memory at address 0, for the ROM bootloader: the Cortex-M0
