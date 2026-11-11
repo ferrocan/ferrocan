@@ -180,11 +180,17 @@ pub(crate) const PSR_DLEC_SHIFT: u32 = 8;
 // TSCC: timestamp counter, counting bit times.
 pub(crate) const TSCC_TSS_INTERNAL: u32 = 0b01;
 
+// TOCC: timeout counter, on the timestamp counter's prescaler (bit times),
+// in continuous mode (TOS 0).
+pub(crate) const TOCC_ETOC: u32 = 1 << 0;
+pub(crate) const TOCC_TOP_SHIFT: u32 = 16;
+
 // IR / IE: interrupts (ST's numbering).
 pub(crate) const IR_RF0N: u32 = 1 << 0;
 pub(crate) const IR_RF0L: u32 = 1 << 2;
 pub(crate) const IR_TCF: u32 = 1 << 8;
 pub(crate) const IR_TEFN: u32 = 1 << 10;
+pub(crate) const IR_TOO: u32 = 1 << 15;
 pub(crate) const IR_EP: u32 = 1 << 17;
 pub(crate) const IR_BO: u32 = 1 << 19;
 pub(crate) const IR_PEA: u32 = 1 << 21;

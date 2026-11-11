@@ -56,7 +56,7 @@ pub use timing::BitTiming;
 use order::MAILBOXES;
 use registers::{
     CCCR_BRSE, CCCR_CCE, CCCR_DAR, CCCR_FDOE, CCCR_INIT, CCCR_MON, CCCR_TEST, DBTP_TDC, H1_MM_SHIFT, ILE_EINT0, IR_BO, IR_EP, IR_PEA, IR_PED, IR_RF0L, IR_RF0N, IR_TCF, IR_TEFN, MessageRam, PSR_ACT_MASK, RegisterBlock, Regs, T1_EFC, TEST_LBCK,
-    TSCC_TSS_INTERNAL, TXFQS_TFQF, TXFQS_TFQPI_SHIFT,
+    TOCC_ETOC, TOCC_TOP_SHIFT, TSCC_TSS_INTERNAL, TXFQS_TFQF, TXFQS_TFQPI_SHIFT,
 };
 
 /// A source of time for timestamps and timeouts.
@@ -126,6 +126,10 @@ pub struct Config {
     pub mode: Mode,
     /// Whether the controller retries a frame until it is sent (the CAN
     /// default), or tries once and gives up (single-shot).
+    ///
+    /// Single-shot, the channel takes the bus error interrupts whether or
+    /// not it reports them, and the timeout counter: a frame that fails
+    /// raises no interrupt of its own.
     pub retransmit: bool,
     /// Whether to report each bus error, through [`Can::next_bus_error`].
     /// Off by default: on a faulty bus there can be thousands a second.
@@ -249,6 +253,11 @@ const MODE_CHANGE_POLLS: u32 = 1_000_000;
 /// one or two only, which fast data phases need anyway.
 const TDC_MAX_PRESCALER: u16 = 2;
 
+/// Bit times from a bus error to the end of its error frame, and so to a
+/// single-shot frame it failed being marked cancelled: up to 12 bits of error
+/// flags, 8 of delimiter and 3 of intermission, with room to spare.
+pub(crate) const ERROR_FRAME_BITS: u32 = 32;
+
 /// An FDCAN channel with confirmed transmission.
 ///
 /// Its events are read with [`ReceiveEvents`], or asynchronously with
@@ -281,6 +290,7 @@ impl<C: Clock, const N: usize> Can<C, N> {
             }
             inner.regs = Some(regs);
             inner.report_bus_errors = config.bus_errors;
+            inner.single_shot = !config.retransmit;
             Ok(())
         })?;
         configure(r, regs.ram(), config);
@@ -293,8 +303,8 @@ impl<C: Clock, const N: usize> Can<C, N> {
 
     /// Stops the controller: cancels the transmissions outstanding, whose
     /// reports follow (`Aborted`, or `Sent` if a frame was already on its
-    /// way), and enters initialisation, leaving the bus. [`start`](Self::start)
-    /// rejoins it.
+    /// way; one that had already ended keeps its outcome), and enters
+    /// initialisation, leaving the bus. [`start`](Self::start) rejoins it.
     ///
     /// # Errors
     ///
@@ -302,6 +312,9 @@ impl<C: Clock, const N: usize> Can<C, N> {
     pub fn stop(&mut self) -> Result<(), Error> {
         let regs = self.regs;
         self.state.with(|inner| {
+            // What has finished already is reported as it ended, not as
+            // aborted: a single-shot frame may have failed unreported.
+            inner.handle(regs, &C::now());
             for mailbox in inner.outstanding.abort_unfinished() {
                 regs.get().txbcr.write(1 << mailbox);
             }
@@ -334,6 +347,8 @@ impl<C: Clock, const N: usize> Can<C, N> {
         configure(self.registers(), self.regs.ram(), config);
         self.state.with(|inner| {
             inner.report_bus_errors = config.bus_errors;
+            inner.single_shot = !config.retransmit;
+            inner.watching = false;
             inner.bus_error = None;
             inner.bus_state = BusState::ErrorActive;
         });
@@ -427,10 +442,12 @@ fn wait_for_init(r: &RegisterBlock, value: u32) -> Result<(), Error> {
 
 /// The interrupts `config` needs: Tx events, frames received, overruns,
 /// cancellations finished, error passive and bus-off changes, and each bus
-/// error if reported.
+/// error if reported or if frames are single-shot (see
+/// [`Inner::watch_failures`](state::Inner::watch_failures)). The timeout
+/// counter's is enabled only while it is needed.
 const fn interrupts(config: Config) -> u32 {
     let base = IR_TEFN | IR_RF0N | IR_RF0L | IR_TCF | IR_EP | IR_BO;
-    if config.bus_errors { base | IR_PEA | IR_PED } else { base }
+    if config.bus_errors || !config.retransmit { base | IR_PEA | IR_PED } else { base }
 }
 
 /// Writes `config` to the controller, which must be in initialisation, and
@@ -466,8 +483,10 @@ fn configure(r: &RegisterBlock, ram: &MessageRam, config: Config) {
 
     // No filters: everything into FIFO 0, which keeps the oldest when full.
     r.rxgfc.write(0);
-    // Stamps count bit times.
+    // Stamps count bit times, and so does the timeout counter, which
+    // single-shot frames need.
     r.tscc.write(TSCC_TSS_INTERNAL);
+    r.tocc.write(if config.retransmit { 0 } else { (ERROR_FRAME_BITS << TOCC_TOP_SHIFT) | TOCC_ETOC });
     // The transmit FIFO, in hand-over order.
     r.txbc.write(0);
 

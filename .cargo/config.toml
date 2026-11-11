@@ -19,6 +19,7 @@ build-sh-c31a = "build -p ferrocan --release --target thumbv7em-none-eabihf --fe
 clippy-sh-c31a = "clippy -p ferrocan --target thumbv7em-none-eabihf --features sh-c31a"
 # can-hal-mcan's bench tests on the NUCLEO-G431KB (its STLINK-V3 is 0483:374e).
 run-mcan-loopback = ["run", "--config", "env.PROBE_RS_PROBE='0483:374e'", "-p", "nucleo-g431kb", "--target", "thumbv7em-none-eabihf", "--bin", "loopback"]
+run-mcan-dar = ["run", "--config", "env.PROBE_RS_PROBE='0483:374e'", "-p", "nucleo-g431kb", "--target", "thumbv7em-none-eabihf", "--bin", "dar"]
 clippy-mcan-bench = "clippy -p nucleo-g431kb --target thumbv7em-none-eabihf"
 
 # Flash with probe-rs through the board's on-board ST-LINK, which each run

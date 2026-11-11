@@ -1,6 +1,6 @@
 [package]
 name = "nucleo-g431kb"
-description = "Bench tests of can-hal-mcan on ST's NUCLEO-G431KB, in internal loopback"
+description = "Bench tests of can-hal-mcan on ST's NUCLEO-G431KB"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +10,11 @@ publish = false
 # Bare metal: there is no test harness on the target.
 [[bin]]
 name = "loopback"
+test = false
+bench = false
+
+[[bin]]
+name = "dar"
 test = false
 bench = false
 

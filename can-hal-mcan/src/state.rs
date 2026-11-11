@@ -13,7 +13,7 @@ use critical_section::Mutex;
 
 use crate::frame::{self, Element};
 use crate::order::{MAILBOXES, Outstanding, Queue};
-use crate::registers::{self, IR_RF0L, PSR_BO, PSR_DLEC_SHIFT, PSR_EP, PSR_LEC_SHIFT, RXFS_FFL_MASK, RXFS_FGI_SHIFT, RegisterBlock, Regs, TXEFS_EFFL_MASK, TXEFS_EFGI_SHIFT};
+use crate::registers::{self, IR_PEA, IR_PED, IR_RF0L, IR_TOO, PSR_BO, PSR_DLEC_SHIFT, PSR_EP, PSR_LEC_SHIFT, RXFS_FFL_MASK, RXFS_FGI_SHIFT, RegisterBlock, Regs, TXEFS_EFFL_MASK, TXEFS_EFGI_SHIFT};
 use crate::{BusError, Clock};
 
 /// The state a [`Can`](crate::Can) channel shares with its interrupt handler,
@@ -36,6 +36,10 @@ pub(crate) struct Inner<T, const N: usize> {
     pub(crate) report_bus_errors: bool,
     pub(crate) bus_error: Option<BusError>,
     pub(crate) error_waker: Option<Waker>,
+    /// Whether frames are single-shot, and whether the timeout counter is
+    /// watching for one to be marked failed.
+    pub(crate) single_shot: bool,
+    pub(crate) watching: bool,
 }
 
 /// Running counts for [`Statistics`](can_hal::Statistics).
@@ -90,6 +94,8 @@ impl<C: Clock, const N: usize> State<C, N> {
                 report_bus_errors: false,
                 bus_error: None,
                 error_waker: None,
+                single_shot: false,
+                watching: false,
                 counts: Counts {
                     rx_frames: 0,
                     tx_frames: 0,
@@ -208,10 +214,39 @@ impl<T: Clone, const N: usize> Inner<T, N> {
             }
         }
         self.push_reports();
+        if self.single_shot {
+            let waiting = self.unfinished_mailboxes().any(|mailbox| pending & (1 << mailbox) != 0);
+            self.watch_failures(r, ir, waiting);
+        }
 
         let _ = self.update_bus_state(r);
         if let Some(waker) = self.waker.take() {
             waker.wake();
+        }
+    }
+
+    /// Without retransmission, a frame that fails raises no interrupt of its
+    /// own: ST's FDCAN marks its buffer cancelled (TXBCF) but never sets TCF.
+    /// The bus error that failed it does interrupt, but before the error
+    /// frame is over and the buffer is marked, so the frame is still pending
+    /// then. So after a bus error with a frame still `waiting`, the timeout
+    /// counter is restarted to interrupt once an error frame would be over,
+    /// and again while frames are waiting; once none is, it is left alone.
+    pub(crate) fn watch_failures(&mut self, r: &RegisterBlock, ir: u32, waiting: bool) {
+        let error = ir & (IR_PEA | IR_PED) != 0;
+        let timed_out = self.watching && ir & IR_TOO != 0;
+        if waiting && (error || timed_out) {
+            // Restarted, with the flag it may have raised while unwatched
+            // cleared, so the next comes a whole period from now.
+            r.tocv.write(0);
+            r.ir.write(IR_TOO);
+            if !self.watching {
+                r.ie.modify(|ie| ie | IR_TOO);
+                self.watching = true;
+            }
+        } else if self.watching && !waiting {
+            r.ie.modify(|ie| ie & !IR_TOO);
+            self.watching = false;
         }
     }
 
