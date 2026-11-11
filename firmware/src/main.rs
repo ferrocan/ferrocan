@@ -52,7 +52,7 @@ async fn main(_spawner: Spawner) {
     let serial = serial_number();
     let mut config = embassy_usb::Config::new(VENDOR_ID, PRODUCT_ID);
     config.manufacturer = Some("Aeolionics");
-    config.product = Some("ferrocan gs_usb adapter");
+    config.product = Some(ferrocan::board::PRODUCT);
     config.serial_number = core::str::from_utf8(&serial).ok();
     config.max_power = 100;
     config.max_packet_size_0 = 64;

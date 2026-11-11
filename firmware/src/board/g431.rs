@@ -21,6 +21,12 @@ pub const BOOTLOADER: usize = 0x1FFF_0000;
 /// FDCAN1's kernel clock: PLL Q, 80 MHz.
 pub const CAN_CLOCK_HZ: u32 = 80_000_000;
 
+/// The USB product string: ferrocan's, with the CAN controller's name as
+/// ST gives it, so that a host with several adapters attached (all with the
+/// same vendor and product IDs) can tell a classic one from an FD one by
+/// name. It names no board, as the firmware may run on any with the chip.
+pub const PRODUCT: &str = "ferrocan gs_usb adapter (FDCAN)";
+
 /// The CAN channel, as this firmware makes it.
 pub type CanChannel = Can<EmbassyClock, CAN_EVENTS>;
 
