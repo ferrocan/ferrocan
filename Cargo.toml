@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["can-hal-bxcan", "firmware", "gs_usb_protocol"]
+members = ["can-hal-bxcan", "can-hal-mcan", "firmware", "gs_usb_protocol", "nucleo-g431kb"]
 
 [workspace.package]
 version = "0.1.0"

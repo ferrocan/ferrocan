@@ -11,12 +11,20 @@ clippy-disco-f072b = "clippy -p ferrocan --target thumbv6m-none-eabi --features 
 # The SH-C30A has no debug probe: flash it over USB with dfu-util (README).
 build-sh-c30a = "build -p ferrocan --release --target thumbv6m-none-eabi --features sh-c30a"
 clippy-sh-c30a = "clippy -p ferrocan --target thumbv6m-none-eabi --features sh-c30a"
+# can-hal-mcan's bench tests on the NUCLEO-G431KB (its STLINK-V3 is 0483:374e).
+build-nucleo-g431kb = "build -p nucleo-g431kb --target thumbv7em-none-eabihf"
+run-nucleo-g431kb-loopback = ["run", "--config", "env.PROBE_RS_PROBE='0483:374e'", "-p", "nucleo-g431kb", "--target", "thumbv7em-none-eabihf", "--bin", "loopback"]
+clippy-nucleo-g431kb = "clippy -p nucleo-g431kb --target thumbv7em-none-eabihf"
 
 # Flash with probe-rs through the board's on-board ST-LINK, which each run
 # alias names (PROBE_RS_PROBE: the Nucleo's V2-1 is 0483:374b, the
 # Discovery's V2 0483:3748), so that other probes on the bench are left alone.
 [target.thumbv6m-none-eabi]
 runner = "probe-rs run --chip STM32F072RB"
+
+# The G431 sleeps in the executor's idle, where the probe can't attach.
+[target.thumbv7em-none-eabihf]
+runner = "probe-rs run --chip STM32G431KB --connect-under-reset"
 
 [env]
 DEFMT_LOG = "debug"
