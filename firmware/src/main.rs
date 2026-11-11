@@ -53,7 +53,7 @@ async fn main(_spawner: Spawner) {
     let mut config_descriptor = [0; 128];
     let mut bos_descriptor = [0; 32];
     let mut control_buf = [0; 64];
-    let mut control = Control::new(&SHARED);
+    let mut control = Control::new(&SHARED, can.status());
     let mut dfu = Dfu::new();
     let mut builder = Builder::new(board.usb, config, &mut config_descriptor, &mut bos_descriptor, &mut [], &mut control_buf);
     builder.handler(&mut control);
@@ -75,10 +75,12 @@ async fn main(_spawner: Spawner) {
     builder.handler(&mut dfu);
     let mut usb = builder.build();
 
+    // A slow blink while running; fast while the host asks the device to
+    // identify itself (`ethtool -p`).
     let blink = async {
         loop {
             board.led.toggle();
-            Timer::after_millis(500).await;
+            Timer::after_millis(if SHARED.identifying() { 100 } else { 500 }).await;
         }
     };
     let detach = async {

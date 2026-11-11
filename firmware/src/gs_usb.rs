@@ -14,9 +14,10 @@
 
 use core::cell::RefCell;
 use core::future::pending as never;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use can_hal::{BusState, BusStatus, CanFrame, CanId, ConfirmedTransmit, ErrorCounters, Event, Outcome, Recover, Statistics, TransmitId};
-use can_hal_bxcan::{BitTiming, Config, Mode};
+use can_hal_bxcan::{BitTiming, Config, Mode, Status};
 use defmt::{debug, info, warn};
 use embassy_futures::select::{Either4, select4};
 use embassy_sync::blocking_mutex::Mutex;
@@ -26,15 +27,24 @@ use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::Handler;
 use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestType};
 use embassy_usb::driver::{EndpointError, EndpointIn, EndpointOut};
-use gs_usb_protocol::{BtConst, CLASSIC_TS_LEN, DeviceBittiming, DeviceConfig, DeviceMode, ECHO_ID_RX, HostFrame, Request as GsRequest, can_err, can_id, feature, frame_flag, mode};
+use gs_usb_protocol::{BtConst, CLASSIC_TS_LEN, DeviceBittiming, DeviceConfig, DeviceMode, DeviceState, ECHO_ID_RX, HostFrame, Request as GsRequest, can_err, can_id, decode_u32, feature, frame_flag, identify, mode, state};
 
 use crate::board::{CAN_CLOCK_HZ, CanChannel};
 
 /// The features the device offers.
-pub const FEATURES: u32 = feature::LISTEN_ONLY | feature::LOOP_BACK | feature::ONE_SHOT | feature::HW_TIMESTAMP;
+pub const FEATURES: u32 = feature::LISTEN_ONLY | feature::LOOP_BACK | feature::ONE_SHOT | feature::HW_TIMESTAMP | feature::IDENTIFY | feature::GET_STATE;
 
-/// The firmware's version, as `DEVICE_CONFIG` reports it.
-const SW_VERSION: u32 = 1;
+/// The flags the host may ask for when starting the channel: the features
+/// that are modes.
+const MODE_FLAGS: u32 = feature::LISTEN_ONLY | feature::LOOP_BACK | feature::ONE_SHOT | feature::HW_TIMESTAMP;
+
+/// The error counters' warning level.
+const WARNING_LEVEL: u8 = 96;
+
+/// The firmware's version, as `DEVICE_CONFIG` reports it. At least 2: Linux's
+/// `gs_usb` ignores the identify feature of firmware older than that, as
+/// candleLight's first releases had it broken.
+const SW_VERSION: u32 = 2;
 /// The hardware's version.
 const HW_VERSION: u32 = 1;
 
@@ -50,6 +60,10 @@ pub enum Command {
 pub struct Shared {
     timing: Mutex<CriticalSectionRawMutex, RefCell<Option<BitTiming>>>,
     command: Signal<CriticalSectionRawMutex, Command>,
+    /// Whether the channel is on the bus, as the bridge last left it.
+    running: AtomicBool,
+    /// Whether the host asked the device to identify itself.
+    identify: AtomicBool,
 }
 
 impl Shared {
@@ -58,7 +72,14 @@ impl Shared {
         Self {
             timing: Mutex::new(RefCell::new(None)),
             command: Signal::new(),
+            running: AtomicBool::new(false),
+            identify: AtomicBool::new(false),
         }
+    }
+
+    /// Whether the host asked the device to identify itself: blink, say.
+    pub fn identifying(&self) -> bool {
+        self.identify.load(Ordering::Relaxed)
     }
 }
 
@@ -74,16 +95,39 @@ pub static SHARED: Shared = Shared::new();
 /// Answers the `gs_usb` vendor requests to interface 0.
 pub struct Control {
     shared: &'static Shared,
+    status: Status,
 }
 
 impl Control {
+    /// A handler sharing `shared` with the bridge, which reads the channel's
+    /// error state from `status`.
     #[must_use]
-    pub const fn new(shared: &'static Shared) -> Self {
-        Self { shared }
+    pub const fn new(shared: &'static Shared, status: Status) -> Self {
+        Self { shared, status }
+    }
+
+    /// The channel's state, as `GET_STATE` reports it.
+    fn state(&self) -> DeviceState {
+        let counters = self.status.error_counters().unwrap_or(ErrorCounters { transmit: 0, receive: 0 });
+        let state = if self.shared.running.load(Ordering::Relaxed) {
+            match self.status.bus_state() {
+                Ok(BusState::BusOff) => state::BUS_OFF,
+                Ok(BusState::ErrorPassive) => state::ERROR_PASSIVE,
+                _ if counters.transmit >= WARNING_LEVEL || counters.receive >= WARNING_LEVEL => state::ERROR_WARNING,
+                _ => state::ERROR_ACTIVE,
+            }
+        } else {
+            state::STOPPED
+        };
+        DeviceState {
+            state,
+            rxerr: u32::from(counters.receive),
+            txerr: u32::from(counters.transmit),
+        }
     }
 
     fn start(&self, flags: u32) -> OutResponse {
-        if flags & !FEATURES != 0 {
+        if flags & !MODE_FLAGS != 0 {
             warn!("gs_usb: mode flags {:#x} not offered", flags);
             return OutResponse::Rejected;
         }
@@ -141,6 +185,15 @@ impl Handler for Control {
                 }
                 _ => OutResponse::Rejected,
             },
+            Some(GsRequest::Identify) if req.value == 0 => match decode_u32(data) {
+                Ok(mode) => {
+                    let on = mode == identify::ON;
+                    info!("gs_usb: identify {}", on);
+                    self.shared.identify.store(on, Ordering::Relaxed);
+                    OutResponse::Accepted
+                }
+                Err(_) => OutResponse::Rejected,
+            },
             _ => OutResponse::Rejected,
         })
     }
@@ -177,6 +230,7 @@ impl Handler for Control {
                 buf[..4].copy_from_slice(&micros(Instant::now()).to_le_bytes());
                 InResponse::Accepted(&buf[..4])
             }
+            Some(GsRequest::GetState) if req.value == 0 => InResponse::Accepted(self.state().encode(buf)),
             _ => InResponse::Rejected,
         })
     }
@@ -250,7 +304,7 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
             Either4::First(Ok(len)) => from_host(can, ep_in, &mut in_buf, &mut pending, &out_buf[..len], timestamps).await,
             Either4::First(Err(EndpointError::Disabled)) => {
                 info!("gs_usb: USB disabled, leaving the bus");
-                stop(can, &mut pending, &mut running);
+                stop(can, &mut pending, &mut running, shared);
                 recovery = Recovery::Idle;
                 ep_out.wait_enabled().await;
             }
@@ -297,12 +351,13 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
                 }
             },
             Either4::Third(Command::Start { config, timestamps: stamped }) => {
-                stop(can, &mut pending, &mut running);
+                stop(can, &mut pending, &mut running, shared);
                 recovery = Recovery::Idle;
                 match can.reconfigure(config) {
                     Ok(()) => {
                         can.start();
                         running = true;
+                        shared.running.store(true, Ordering::Relaxed);
                         timestamps = stamped;
                         bus = BusState::ErrorActive;
                         lost = lost_frames(can);
@@ -312,7 +367,7 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
                 }
             }
             Either4::Third(Command::Reset) => {
-                stop(can, &mut pending, &mut running);
+                stop(can, &mut pending, &mut running, shared);
                 recovery = Recovery::Idle;
                 info!("gs_usb: reset");
             }
@@ -425,11 +480,12 @@ fn error_frame(from: BusState, to: BusState, counters: ErrorCounters) -> HostFra
 
 /// Leaves the bus and forgets the frames awaiting reports: the host has
 /// forgotten them too.
-fn stop(can: &mut CanChannel, pending: &mut [Option<Pending>; 3], running: &mut bool) {
+fn stop(can: &mut CanChannel, pending: &mut [Option<Pending>; 3], running: &mut bool, shared: &Shared) {
     if *running && let Err(e) = can.stop() {
         warn!("gs_usb: can't stop the controller: {}", e);
     }
     *running = false;
+    shared.running.store(false, Ordering::Relaxed);
     *pending = [const { None }; 3];
 }
 

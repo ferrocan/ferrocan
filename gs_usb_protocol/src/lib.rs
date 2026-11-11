@@ -319,6 +319,24 @@ impl BtConst {
     }
 }
 
+/// [`Request::Identify`]'s mode.
+pub mod identify {
+    /// Stop identifying.
+    pub const OFF: u32 = 0;
+    /// Blink, or otherwise show which device this is.
+    pub const ON: u32 = 1;
+}
+
+/// A request's single `u32`, as [`Request::Identify`] and
+/// [`Request::HostFormat`] carry.
+///
+/// # Errors
+///
+/// [`DecodeError::Short`] for fewer than 4 bytes.
+pub fn decode_u32(bytes: &[u8]) -> Result<u32, DecodeError> {
+    u32_at(bytes, 0)
+}
+
 /// [`DeviceState::state`]'s values.
 pub mod state {
     /// Error active.

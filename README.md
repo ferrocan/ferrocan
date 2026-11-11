@@ -39,6 +39,9 @@ restarted, with the error counters), and lost frames as the overflow flag:
 with no bus attached, one frame takes the channel to error passive and
 bus-off, which Linux follows. After 100 ms bus-off the channel recovers by
 itself, as candleLight and Kvaser's adapters do, and Linux counts the restart.
+The host can read the bus state and error counters (`GET_STATE`, shown by
+`ip -details link show` as `berr-counter`), and ask the device to identify
+itself (`ethtool -p`), which blinks its LED fast.
 
 A DFU runtime interface beside the gs_usb one restarts the device in ST's ROM
 bootloader, so it can be reflashed over USB without its boot switch (see

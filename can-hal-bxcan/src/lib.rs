@@ -275,6 +275,13 @@ impl<C: Clock, const N: usize> Can<C, N> {
         self.registers().mcr.modify(|mcr| mcr & !MCR_INRQ);
     }
 
+    /// A read-only view of the channel's error state, to read it without
+    /// the channel.
+    #[must_use]
+    pub const fn status(&self) -> Status {
+        Status { regs: self.regs }
+    }
+
     /// Whether the controller has joined the bus since [`start`](Self::start).
     #[must_use]
     pub fn is_synchronized(&self) -> bool {
@@ -406,12 +413,32 @@ impl<C: Clock, const N: usize> BusStatus for Can<C, N> {
     type Error = Error;
 
     fn bus_state(&self) -> Result<BusState, Error> {
-        Ok(state::bus_state(self.registers().esr.read()))
+        self.status().bus_state()
     }
 
     fn error_counters(&self) -> Result<ErrorCounters, Error> {
-        let esr = self.registers().esr.read();
-        #[allow(clippy::cast_possible_truncation)] // eight-bit fields
+        self.status().error_counters()
+    }
+}
+
+/// A read-only view of a channel's error state, for code that doesn't hold
+/// the channel: a USB control handler answering a request for it, say. It
+/// only reads the error status register.
+#[derive(Clone, Copy)]
+pub struct Status {
+    regs: Regs,
+}
+
+impl BusStatus for Status {
+    type Error = Error;
+
+    fn bus_state(&self) -> Result<BusState, Error> {
+        Ok(state::bus_state(self.regs.get().esr.read()))
+    }
+
+    fn error_counters(&self) -> Result<ErrorCounters, Error> {
+        let esr = self.regs.get().esr.read();
+        #[expect(clippy::cast_possible_truncation, reason = "the counters are eight-bit fields")]
         Ok(ErrorCounters {
             transmit: (esr >> 16) as u8,
             receive: (esr >> 24) as u8,
