@@ -23,13 +23,10 @@ use embassy_usb::driver::{Direction, EndpointAddress};
 use embassy_usb::msos::{self, windows_version};
 use ferrocan::board::{Board, CanChannel, Leds};
 use ferrocan::dfu::{self, Dfu};
-use ferrocan::gs_usb::{self, Control, SHARED, Shared};
+use ferrocan::gs_usb::{self, Control, MAX_PACKET, SHARED, Shared};
 use gs_usb_protocol::{PRODUCT_ID, VENDOR_ID};
 #[cfg(not(feature = "panic-dfu"))]
 use panic_probe as _;
-
-/// Bulk packets: a classic frame, with its timestamp, is 24 bytes.
-const MAX_PACKET: u16 = 64;
 
 /// The vendor request Windows reads the Microsoft OS 2.0 descriptors with:
 /// candleLight's, clear of the `gs_usb` requests.
@@ -63,7 +60,8 @@ async fn main(_spawner: Spawner) {
     let mut config_descriptor = [0; 128];
     // The BOS carries the Microsoft OS 2.0 platform capability (28 bytes).
     let mut bos_descriptor = [0; 64];
-    let mut control_buf = [0; 64];
+    // The longest control transfer: BT_CONST_EXT's 72 bytes.
+    let mut control_buf = [0; 128];
     let mut msos_descriptor = [0; 384];
     let mut control = Control::<CanChannel>::new(&SHARED, can.status());
     let mut dfu = Dfu::new();

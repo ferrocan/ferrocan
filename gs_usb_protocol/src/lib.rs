@@ -50,7 +50,8 @@ pub enum Request {
     SetUserId,
     /// OUT, a [`DeviceBittiming`]: the CAN FD data bit timing.
     DataBittiming,
-    /// IN: the features and timing limits including CAN FD's data phase.
+    /// IN, a [`BtConstExt`]: the features and timing limits including CAN
+    /// FD's data phase.
     BtConstExt,
     /// OUT, a `u32`: switch the termination resistor.
     SetTermination,
@@ -208,8 +209,6 @@ pub mod can_err {
 pub enum DecodeError {
     /// Too few bytes.
     Short,
-    /// A CAN FD frame, where only classic frames are supported.
-    Fd,
     /// A DLC over 15.
     Dlc,
 }
@@ -338,6 +337,31 @@ impl BtConst {
     }
 }
 
+/// [`Request::BtConstExt`]: [`BtConst`] followed by the ranges of the data
+/// phase's bit timing fields, for a device with [`feature::FD`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs, reason = "named as in Linux's struct gs_device_bt_const_extended")]
+pub struct BtConstExt {
+    pub nominal: BtConst,
+    pub dtseg1_min: u32,
+    pub dtseg1_max: u32,
+    pub dtseg2_min: u32,
+    pub dtseg2_max: u32,
+    pub dsjw_max: u32,
+    pub dbrp_min: u32,
+    pub dbrp_max: u32,
+    pub dbrp_inc: u32,
+}
+
+impl BtConstExt {
+    /// Its 72 bytes, written into `out` (at least 72 long).
+    pub fn encode<'a>(&self, out: &'a mut [u8]) -> &'a [u8] {
+        self.nominal.encode(out);
+        put_u32s([self.dtseg1_min, self.dtseg1_max, self.dtseg2_min, self.dtseg2_max, self.dsjw_max, self.dbrp_min, self.dbrp_max, self.dbrp_inc], &mut out[40..]);
+        &out[..72]
+    }
+}
+
 /// [`Request::Identify`]'s mode.
 pub mod identify {
     /// Stop identifying.
@@ -400,10 +424,32 @@ pub const HEADER_LEN: usize = 12;
 pub const CLASSIC_LEN: usize = HEADER_LEN + 8;
 /// A classic frame's length with a timestamp.
 pub const CLASSIC_TS_LEN: usize = CLASSIC_LEN + 4;
+/// A CAN FD frame's length on the wire, without a timestamp: the 64 data
+/// bytes are always present. Linux sends every frame at this length, classic
+/// ones too, once a channel is started in FD mode.
+pub const FD_LEN: usize = HEADER_LEN + 64;
+/// A CAN FD frame's length with a timestamp.
+pub const FD_TS_LEN: usize = FD_LEN + 4;
 
-/// A classic CAN frame between host and device: one the host sends (OUT),
-/// one received from the bus (IN, [`ECHO_ID_RX`]), or the echo of one the host
-/// sent (IN, its `echo_id`), with the eight data bytes always present.
+/// The data length an FD DLC stands for.
+#[must_use]
+pub const fn fd_len(dlc: u8) -> usize {
+    match dlc {
+        0..=8 => dlc as usize,
+        9 => 12,
+        10 => 16,
+        11 => 20,
+        12 => 24,
+        13 => 32,
+        14 => 48,
+        _ => 64,
+    }
+}
+
+/// A CAN frame between host and device: one the host sends (OUT), one
+/// received from the bus (IN, [`ECHO_ID_RX`]), or the echo of one the host
+/// sent (IN, its `echo_id`). A classic frame ([`frame_flag::FD`] clear)
+/// carries eight data bytes on the wire, an FD frame 64, whatever its DLC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostFrame {
     /// [`ECHO_ID_RX`], or the host's identifier for a frame it sent.
@@ -416,33 +462,39 @@ pub struct HostFrame {
     pub channel: u8,
     /// [`frame_flag`]s.
     pub flags: u8,
-    /// The data; bytes past the DLC's length are zero.
-    pub data: [u8; 8],
+    /// The data; bytes past the DLC's length are zero. A classic frame uses
+    /// the first eight.
+    pub data: [u8; 64],
     /// Microseconds on the device's timer, when [`feature::HW_TIMESTAMP`]
     /// was asked for (IN only).
     pub timestamp_us: Option<u32>,
 }
 
 impl HostFrame {
-    /// Decodes a classic frame, the host's (no timestamp).
+    /// Whether this is a CAN FD frame.
+    #[must_use]
+    pub const fn is_fd(&self) -> bool {
+        self.flags & frame_flag::FD != 0
+    }
+
+    /// Decodes a frame the host sent (no timestamp). A classic frame needs
+    /// [`CLASSIC_LEN`] bytes; an FD frame its header and the data its DLC
+    /// calls for, though Linux sends all 64. Any bytes beyond are ignored, as
+    /// a classic frame in FD mode has [`FD_LEN`].
     ///
     /// # Errors
     ///
-    /// [`DecodeError::Short`] for fewer than [`CLASSIC_LEN`] bytes,
-    /// [`DecodeError::Fd`] for a CAN FD frame and [`DecodeError::Dlc`] for a
+    /// [`DecodeError::Short`] for too few bytes and [`DecodeError::Dlc`] for a
     /// DLC over 15.
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let header = bytes.get(..CLASSIC_LEN).ok_or(DecodeError::Short)?;
-        let flags = header[10];
-        if flags & frame_flag::FD != 0 {
-            return Err(DecodeError::Fd);
-        }
-        let can_dlc = header[8];
+        let header = bytes.get(..HEADER_LEN).ok_or(DecodeError::Short)?;
+        let (can_dlc, flags) = (header[8], header[10]);
         if can_dlc > 15 {
             return Err(DecodeError::Dlc);
         }
-        let mut data = [0; 8];
-        data.copy_from_slice(&header[HEADER_LEN..CLASSIC_LEN]);
+        let len = if flags & frame_flag::FD != 0 { fd_len(can_dlc) } else { 8 };
+        let mut data = [0; 64];
+        data[..len].copy_from_slice(bytes.get(HEADER_LEN..HEADER_LEN + len).ok_or(DecodeError::Short)?);
         Ok(Self {
             echo_id: u32_at(header, 0)?,
             can_id: u32_at(header, 1)?,
@@ -454,20 +506,22 @@ impl HostFrame {
         })
     }
 
-    /// Encodes the frame into `out` (at least [`CLASSIC_TS_LEN`] long),
-    /// returning the bytes to send: [`CLASSIC_LEN`] of them, or
-    /// [`CLASSIC_TS_LEN`] with a timestamp.
+    /// Encodes the frame into `out` (at least [`FD_TS_LEN`] long, or
+    /// [`CLASSIC_TS_LEN`] for a classic frame), returning the bytes to send:
+    /// [`CLASSIC_LEN`] or [`FD_LEN`], and four more with a timestamp.
     pub fn encode<'a>(&self, out: &'a mut [u8]) -> &'a [u8] {
+        let data_len = if self.is_fd() { 64 } else { 8 };
+        let end = HEADER_LEN + data_len;
         out[..4].copy_from_slice(&self.echo_id.to_le_bytes());
         out[4..8].copy_from_slice(&self.can_id.to_le_bytes());
         out[8..HEADER_LEN].copy_from_slice(&[self.can_dlc, self.channel, self.flags, 0]);
-        out[HEADER_LEN..CLASSIC_LEN].copy_from_slice(&self.data);
+        out[HEADER_LEN..end].copy_from_slice(&self.data[..data_len]);
         match self.timestamp_us {
             Some(timestamp) => {
-                out[CLASSIC_LEN..CLASSIC_TS_LEN].copy_from_slice(&timestamp.to_le_bytes());
-                &out[..CLASSIC_TS_LEN]
+                out[end..end + 4].copy_from_slice(&timestamp.to_le_bytes());
+                &out[..end + 4]
             }
-            None => &out[..CLASSIC_LEN],
+            None => &out[..end],
         }
     }
 }
@@ -492,7 +546,7 @@ mod tests {
             can_dlc: 12,
             channel: 0,
             flags: 0,
-            data: [1, 2, 3, 4, 5, 6, 7, 8],
+            data: data(&[1, 2, 3, 4, 5, 6, 7, 8]),
             timestamp_us: None,
         };
         let mut buf = [0; CLASSIC_TS_LEN];
@@ -510,7 +564,7 @@ mod tests {
             can_dlc: 1,
             channel: 0,
             flags: 0,
-            data: [0xAA, 0, 0, 0, 0, 0, 0, 0],
+            data: data(&[0xAA]),
             timestamp_us: Some(0x0102_0304),
         };
         let mut buf = [0; CLASSIC_TS_LEN];
@@ -519,12 +573,51 @@ mod tests {
         assert_eq!(&bytes[20..], &[4, 3, 2, 1]);
     }
 
+    fn data(bytes: &[u8]) -> [u8; 64] {
+        let mut data = [0; 64];
+        data[..bytes.len()].copy_from_slice(bytes);
+        data
+    }
+
     #[test]
-    fn refuses_short_fd_and_bad_dlc() {
+    fn fd_frames() {
+        let payload: std::vec::Vec<u8> = (1..=64).collect();
+        let frame = HostFrame {
+            echo_id: 7,
+            can_id: 0x123,
+            can_dlc: 15,
+            channel: 0,
+            flags: frame_flag::FD | frame_flag::BRS,
+            data: data(&payload),
+            timestamp_us: None,
+        };
+        let mut buf = [0; FD_TS_LEN];
+        let bytes = frame.encode(&mut buf);
+        assert_eq!(bytes.len(), FD_LEN);
+        assert_eq!(HostFrame::decode(bytes), Ok(frame));
+        let stamped = HostFrame { timestamp_us: Some(9), ..frame }.encode(&mut buf).to_vec();
+        assert_eq!(stamped.len(), FD_TS_LEN);
+        assert_eq!(&stamped[76..], &[9, 0, 0, 0]);
+        // A host may send only the data its DLC calls for: DLC 9, 12 bytes.
+        let mut short = [0; HEADER_LEN + 12];
+        short[8] = 9;
+        short[10] = frame_flag::FD;
+        short[HEADER_LEN..].copy_from_slice(&[5; 12]);
+        assert_eq!(HostFrame::decode(&short).unwrap().data, data(&[5; 12]));
+        assert_eq!(HostFrame::decode(&short[..HEADER_LEN + 11]), Err(DecodeError::Short));
+        // Linux in FD mode sends a classic frame at FD length.
+        let mut classic = [0; FD_LEN];
+        classic[8] = 2;
+        classic[HEADER_LEN..HEADER_LEN + 2].copy_from_slice(&[1, 2]);
+        let decoded = HostFrame::decode(&classic).unwrap();
+        assert!(!decoded.is_fd());
+        assert_eq!(decoded.encode(&mut buf).len(), CLASSIC_LEN);
+        assert_eq!(fd_len(13), 32);
+    }
+
+    #[test]
+    fn refuses_short_and_bad_dlc() {
         assert_eq!(HostFrame::decode(&[0; 19]), Err(DecodeError::Short));
-        let mut fd = [0; CLASSIC_LEN];
-        fd[10] = frame_flag::FD;
-        assert_eq!(HostFrame::decode(&fd), Err(DecodeError::Fd));
         let mut dlc = [0; CLASSIC_LEN];
         dlc[8] = 16;
         assert_eq!(HostFrame::decode(&dlc), Err(DecodeError::Dlc));
@@ -561,5 +654,21 @@ mod tests {
         assert_eq!(bytes.len(), 40);
         assert_eq!(&bytes[4..8], &48_000_000u32.to_le_bytes());
         assert_eq!(DeviceState { state: state::BUS_OFF, rxerr: 0, txerr: 255 }.encode(&mut buf), &[3, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0]);
+        let mut ext_buf = [0; 72];
+        let ext = BtConstExt {
+            nominal: bt_const,
+            dtseg1_min: 1,
+            dtseg1_max: 32,
+            dtseg2_min: 1,
+            dtseg2_max: 16,
+            dsjw_max: 16,
+            dbrp_min: 1,
+            dbrp_max: 32,
+            dbrp_inc: 1,
+        };
+        let bytes = ext.encode(&mut ext_buf);
+        assert_eq!(bytes.len(), 72);
+        assert_eq!(&bytes[40..48], &[1, 0, 0, 0, 32, 0, 0, 0]);
+        assert_eq!(&bytes[68..], &[1, 0, 0, 0]);
     }
 }
