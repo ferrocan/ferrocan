@@ -25,10 +25,10 @@
 use can_hal::{BusState, BusStatus, CanFrame, CanId, ConfirmedTransmit, Event, Outcome, SamplePoint, Statistics, TransmitId, TryTransmitError};
 use can_hal_bxcan::{BitTiming, Can, Config, Mode};
 use defmt::{Debug2Format, error, info};
+use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, with_timeout};
 use ferrocan::board::{self, Board, CAN_CLOCK_HZ, CAN_EVENTS, CAN_STATE, EmbassyClock};
-use defmt_rtt as _;
 #[cfg(not(feature = "panic-dfu"))]
 use panic_probe as _;
 

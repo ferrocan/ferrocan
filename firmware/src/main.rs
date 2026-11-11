@@ -16,17 +16,17 @@
 use can_hal::SamplePoint;
 use can_hal_bxcan::{BitTiming, Can, Config};
 use defmt::info;
+use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_futures::join::join4;
 use embassy_time::{Duration, Ticker, Timer};
 use embassy_usb::Builder;
-use embassy_usb::msos::{self, windows_version};
 use embassy_usb::driver::{Direction, EndpointAddress};
+use embassy_usb::msos::{self, windows_version};
 use ferrocan::board::{self, Board, CAN_CLOCK_HZ, CAN_STATE, Leds};
 use ferrocan::dfu::{self, Dfu};
 use ferrocan::gs_usb::{self, Control, SHARED, Shared};
 use gs_usb_protocol::{PRODUCT_ID, VENDOR_ID};
-use defmt_rtt as _;
 #[cfg(not(feature = "panic-dfu"))]
 use panic_probe as _;
 
