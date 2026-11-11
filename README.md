@@ -40,7 +40,11 @@ with no bus attached, one frame takes the channel to error passive and
 bus-off, which Linux follows. After 100 ms bus-off the channel recovers by
 itself, as candleLight and Kvaser's adapters do, and Linux counts the restart.
 
-Not yet: DFU detach, a real bus.
+A DFU runtime interface beside the gs_usb one restarts the device in ST's ROM
+bootloader, so it can be reflashed over USB without its boot switch (see
+below).
+
+Not yet: a real bus.
 
 # Building
 
@@ -51,6 +55,20 @@ cargo build-nucleo-f072rb
 cargo run-nucleo-f072rb      # flash with probe-rs through the Nucleo's ST-LINK, then show the log
 cargo clippy-nucleo-f072rb
 ```
+
+# Flashing over USB
+
+On a board without a debug probe, such as an adapter, flash over USB with
+`dfu-util` and `arm-none-eabi-objcopy`:
+
+```sh
+arm-none-eabi-objcopy -O binary target/thumbv6m-none-eabi/release/ferrocan ferrocan.bin
+dfu-util -d 1d50:606f -e                                     # restart in the ROM bootloader
+dfu-util -d 0483:df11 -a 0 -s 0x08000000:leave -D ferrocan.bin  # flash, then run it
+```
+
+A board still running other firmware can be put in the bootloader with its
+boot switch instead.
 
 # License
 

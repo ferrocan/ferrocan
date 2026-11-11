@@ -22,6 +22,10 @@ compile_error!("Build for a board, through its cargo alias, such as `cargo build
 #[cfg(all(feature = "nucleo-f072rb", feature = "disco-f072b"))]
 compile_error!("Build for one board at a time.");
 
+/// The ROM bootloader: the `STM32F07x`'s system memory, its vector table
+/// first (ST's `AN2606`).
+pub const BOOTLOADER: usize = 0x1FFF_C800;
+
 /// The CAN controller's clock, APB1: the 48 MHz system clock undivided.
 pub const CAN_CLOCK_HZ: u32 = 48_000_000;
 

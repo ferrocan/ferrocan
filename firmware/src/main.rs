@@ -17,11 +17,12 @@ use can_hal::SamplePoint;
 use can_hal_bxcan::{BitTiming, Can, Config};
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_futures::join::join3;
+use embassy_futures::join::join4;
 use embassy_time::Timer;
 use embassy_usb::Builder;
 use embassy_usb::driver::{Direction, EndpointAddress};
 use ferrocan::board::{self, Board, CAN_CLOCK_HZ, CAN_STATE};
+use ferrocan::dfu::{self, Dfu};
 use ferrocan::gs_usb::{self, Control, SHARED};
 use gs_usb_protocol::{PRODUCT_ID, VENDOR_ID};
 use {defmt_rtt as _, panic_probe as _};
@@ -31,6 +32,8 @@ const MAX_PACKET: u16 = 64;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
+    // Before anything is set up: a DFU detach restarts the device here.
+    dfu::enter_bootloader_if_requested();
     let mut board = Board::init();
     info!("ferrocan {} up", env!("CARGO_PKG_VERSION"));
 
@@ -51,6 +54,7 @@ async fn main(_spawner: Spawner) {
     let mut bos_descriptor = [0; 32];
     let mut control_buf = [0; 64];
     let mut control = Control::new(&SHARED);
+    let mut dfu = Dfu::new();
     let mut builder = Builder::new(board.usb, config, &mut config_descriptor, &mut bos_descriptor, &mut [], &mut control_buf);
     builder.handler(&mut control);
     let mut function = builder.function(0xFF, 0xFF, 0xFF);
@@ -60,6 +64,15 @@ async fn main(_spawner: Spawner) {
     let mut ep_in = alt.endpoint_bulk_in(Some(EndpointAddress::from_parts(1, Direction::In)), MAX_PACKET);
     let mut ep_out = alt.endpoint_bulk_out(Some(EndpointAddress::from_parts(2, Direction::Out)), MAX_PACKET);
     drop(function);
+
+    // Interface 1, DFU runtime: `dfu-util -e` restarts in the ROM bootloader.
+    let mut function = builder.function(dfu::CLASS, dfu::SUBCLASS, dfu::PROTOCOL);
+    let mut interface = function.interface();
+    dfu.set_interface(interface.interface_number());
+    let mut alt = interface.alt_setting(dfu::CLASS, dfu::SUBCLASS, dfu::PROTOCOL, None);
+    alt.descriptor(dfu::FUNCTIONAL_DESCRIPTOR_TYPE, &dfu::FUNCTIONAL_DESCRIPTOR);
+    drop(function);
+    builder.handler(&mut dfu);
     let mut usb = builder.build();
 
     let blink = async {
@@ -68,5 +81,11 @@ async fn main(_spawner: Spawner) {
             Timer::after_millis(500).await;
         }
     };
-    join3(usb.run(), gs_usb::bridge(&mut can, &mut ep_in, &mut ep_out, &SHARED), blink).await;
+    let detach = async {
+        dfu::DETACH.wait().await;
+        // Time for the request's status stage to reach the host.
+        Timer::after_millis(50).await;
+        dfu::reboot_into_bootloader()
+    };
+    join4(usb.run(), gs_usb::bridge(&mut can, &mut ep_in, &mut ep_out, &SHARED), blink, detach).await;
 }
