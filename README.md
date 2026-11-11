@@ -50,7 +50,15 @@ below).
 It runs on the DSD TECH SH-C30A (a CANable V1.1), flashed over USB from its
 stock candleLight firmware without the boot switch, keeping its serial number.
 
-Not yet: a real bus.
+On a real bus at 250 kbit/s, the SH-C30A against a Kvaser Leaf Light v2 (both
+through Linux), frames of every kind go both ways unchanged, with each echo
+sent once the Leaf acknowledged the frame; 2000-frame bursts at 1 ms arrive
+complete in each direction; and with the Leaf saturating the bus (about 1700
+eight-byte extended frames a second) ferrocan receives every frame, with no
+overruns or errors.
+
+Not yet: single-shot on a working bus, error frames and recovery from a real
+fault, CAN FD on the G431.
 
 # Building
 
