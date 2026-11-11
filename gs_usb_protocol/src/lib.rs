@@ -165,6 +165,25 @@ pub mod can_err {
     /// Identifier: the error counters are in `data[6]` (transmit) and
     /// `data[7]` (receive).
     pub const CNT: u32 = 0x0000_0200;
+    /// Identifier: a protocol violation, the kind in `data[2]` and where in
+    /// `data[3]` ([`prot`]).
+    pub const PROT: u32 = 0x0000_0008;
+    /// Identifier: a bus error (with [`BERR_REPORTING`](crate::feature::BERR_REPORTING)).
+    pub const BUSERROR: u32 = 0x0000_0080;
+
+    /// `data[2]` and `data[3]` of a [`PROT`] error frame.
+    pub mod prot {
+        /// `data[2]`: a form error.
+        pub const FORM: u8 = 0x02;
+        /// `data[2]`: a stuff error.
+        pub const STUFF: u8 = 0x04;
+        /// `data[2]`: unable to send a dominant bit.
+        pub const BIT0: u8 = 0x08;
+        /// `data[2]`: unable to send a recessive bit.
+        pub const BIT1: u8 = 0x10;
+        /// `data[3]`: in the CRC sequence.
+        pub const LOC_CRC_SEQ: u8 = 0x08;
+    }
 
     /// `data[1]` of a [`CRTL`] error frame.
     pub mod crtl {

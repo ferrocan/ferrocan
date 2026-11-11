@@ -52,7 +52,8 @@ pub use timing::BitTiming;
 
 use order::MAILBOXES;
 use registers::{
-    BTR_LBKM, BTR_SILM, FMR_FINIT, IER_BOFIE, IER_EPVIE, IER_ERRIE, IER_FMPIE0, IER_FMPIE1, IER_FOVIE0, IER_FOVIE1, IER_TMEIE, IR_TXRQ, MCR_INRQ, MCR_NART, MCR_SLEEP, MCR_TTCM, MCR_TXFP, MSR_INAK, MSR_SLAK, RegisterBlock, Regs, tsr_abrq, tsr_tme,
+    BTR_LBKM, BTR_SILM, FMR_FINIT, IER_BOFIE, IER_EPVIE, IER_ERRIE, IER_FMPIE0, IER_FMPIE1, IER_FOVIE0, IER_FOVIE1, IER_LECIE, IER_TMEIE, IR_TXRQ, MCR_INRQ, MCR_NART, MCR_SLEEP, MCR_TTCM, MCR_TXFP, MSR_INAK, MSR_SLAK, RegisterBlock, Regs, tsr_abrq,
+    tsr_tme,
 };
 
 /// A source of time for timestamps and timeouts.
@@ -116,13 +117,21 @@ pub struct Config {
     /// Whether the controller retries a frame until it is sent (the CAN
     /// default), or tries once and gives up (single-shot).
     pub retransmit: bool,
+    /// Whether to report each bus error, through [`Can::next_bus_error`].
+    /// Off by default: on a faulty bus there can be thousands a second.
+    pub bus_errors: bool,
 }
 
 impl Config {
     /// A normal channel with the given timing, retrying frames until sent.
     #[must_use]
     pub const fn new(timing: BitTiming) -> Self {
-        Self { timing, mode: Mode::Normal, retransmit: true }
+        Self {
+            timing,
+            mode: Mode::Normal,
+            retransmit: true,
+            bus_errors: false,
+        }
     }
 
     /// The same, in `mode`.
@@ -137,6 +146,47 @@ impl Config {
     pub const fn with_retransmit(mut self, retransmit: bool) -> Self {
         self.retransmit = retransmit;
         self
+    }
+
+    /// The same, reporting bus errors or not.
+    #[must_use]
+    pub const fn with_bus_errors(mut self, bus_errors: bool) -> Self {
+        self.bus_errors = bus_errors;
+        self
+    }
+}
+
+/// A bus error the controller saw, from its last error code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum BusError {
+    /// More than five equal bits in a row.
+    Stuff,
+    /// A fixed-form field held an illegal bit.
+    Form,
+    /// The frame it sent wasn't acknowledged.
+    Acknowledgement,
+    /// It sent a recessive bit and read back a dominant one.
+    BitRecessive,
+    /// It sent a dominant bit and read back a recessive one.
+    BitDominant,
+    /// A received frame's CRC didn't match.
+    Crc,
+}
+
+impl BusError {
+    /// The error a last error code (ESR's LEC) stands for, if any.
+    pub(crate) const fn from_lec(lec: u32) -> Option<Self> {
+        Some(match lec {
+            1 => Self::Stuff,
+            2 => Self::Form,
+            3 => Self::Acknowledgement,
+            4 => Self::BitRecessive,
+            5 => Self::BitDominant,
+            6 => Self::Crc,
+            _ => return None,
+        })
     }
 }
 
@@ -217,9 +267,10 @@ impl<C: Clock, const N: usize> Can<C, N> {
                 return Err(Error::StateInUse);
             }
             inner.regs = Some(regs);
+            inner.report_bus_errors = config.bus_errors;
             Ok(())
         })?;
-        r.ier.write(IER_TMEIE | IER_FMPIE0 | IER_FMPIE1 | IER_FOVIE0 | IER_FOVIE1 | IER_EPVIE | IER_BOFIE | IER_ERRIE);
+        r.ier.write(interrupts(config));
         Ok(Self { regs, state })
     }
 
@@ -266,6 +317,11 @@ impl<C: Clock, const N: usize> Can<C, N> {
     pub fn reconfigure(&mut self, config: Config) -> Result<(), Error> {
         self.stop()?;
         configure(self.registers(), config);
+        self.registers().ier.write(interrupts(config));
+        self.state.with(|inner| {
+            inner.report_bus_errors = config.bus_errors;
+            inner.bus_error = None;
+        });
         Ok(())
     }
 
@@ -288,8 +344,26 @@ impl<C: Clock, const N: usize> Can<C, N> {
         self.registers().msr.read() & MSR_INAK == 0
     }
 
+    /// The next bus error, waiting for one, when the channel was configured
+    /// to report them ([`Config::bus_errors`]); otherwise it waits for ever.
+    /// Errors that come faster than they are read are counted
+    /// ([`Statistics`]) but only the latest is kept.
+    pub async fn next_bus_error(&self) -> BusError {
+        poll_fn(|cx| {
+            self.state.with(|inner| {
+                if let Some(error) = inner.bus_error.take() {
+                    Poll::Ready(error)
+                } else {
+                    inner.error_waker = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            })
+        })
+        .await
+    }
+
     /// The next event, waiting for one.
-    pub async fn next_event(&mut self) -> Event<CanFrame, C::Instant> {
+    pub async fn next_event(&self) -> Event<CanFrame, C::Instant> {
         let regs = self.regs;
         poll_fn(|cx| {
             self.state.with(|inner| {
@@ -304,6 +378,13 @@ impl<C: Clock, const N: usize> Can<C, N> {
         })
         .await
     }
+}
+
+/// The interrupts `config` needs: transmissions finished, frames received,
+/// overruns, error passive and bus-off, and each bus error if reported.
+const fn interrupts(config: Config) -> u32 {
+    let base = IER_TMEIE | IER_FMPIE0 | IER_FMPIE1 | IER_FOVIE0 | IER_FOVIE1 | IER_EPVIE | IER_BOFIE | IER_ERRIE;
+    if config.bus_errors { base | IER_LECIE } else { base }
 }
 
 /// Writes `config` to the controller, which must be in initialisation mode.
@@ -471,6 +552,7 @@ impl<C: Clock, const N: usize> Statistics for Can<C, N> {
         statistics.rx_dropped = Some(u64::from(counts.rx_dropped));
         statistics.rx_overruns = Some(u64::from(counts.rx_overruns));
         statistics.tx_failed = Some(u64::from(counts.tx_failed));
+        statistics.bus_errors = Some(u64::from(counts.bus_errors));
         Ok(statistics)
     }
 }

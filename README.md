@@ -63,6 +63,12 @@ bit rate, ferrocan went error passive on transmit and receive, bus-off,
 restarted by itself, and returned to error active once the Leaf was put right,
 with Linux following each step from its error frames.
 
+When the host asks for bus error reporting (`ip link … berr-reporting on`),
+each bus error reaches it as an error frame, as candleLight writes them: with
+nobody to acknowledge, every retry is reported, about 3400 a second at
+250 kbit/s, until a node acknowledges. On USB suspend the channel leaves the
+bus.
+
 The LEDs show what the adapter is doing: a brief heartbeat each second while
 stopped; dark on the bus, flashing for each frame received (RX) and sent (TX);
 blinking fast to identify. A firmware that panics on a board with no debug

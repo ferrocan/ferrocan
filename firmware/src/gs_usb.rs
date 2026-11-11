@@ -17,9 +17,9 @@ use core::future::pending as never;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use can_hal::{BusState, BusStatus, CanFrame, CanId, ConfirmedTransmit, ErrorCounters, Event, Outcome, Recover, Statistics, TransmitId};
-use can_hal_bxcan::{BitTiming, Config, Mode, Status};
+use can_hal_bxcan::{BitTiming, BusError, Config, Mode, Status};
 use defmt::{debug, info, warn};
-use embassy_futures::select::{Either4, select4};
+use embassy_futures::select::{Either, Either4, select, select4};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
@@ -32,11 +32,11 @@ use gs_usb_protocol::{BtConst, CLASSIC_TS_LEN, DeviceBittiming, DeviceConfig, De
 use crate::board::{CAN_CLOCK_HZ, CanChannel};
 
 /// The features the device offers.
-pub const FEATURES: u32 = feature::LISTEN_ONLY | feature::LOOP_BACK | feature::ONE_SHOT | feature::HW_TIMESTAMP | feature::IDENTIFY | feature::GET_STATE;
+pub const FEATURES: u32 = MODE_FLAGS | feature::IDENTIFY | feature::GET_STATE;
 
 /// The flags the host may ask for when starting the channel: the features
 /// that are modes.
-const MODE_FLAGS: u32 = feature::LISTEN_ONLY | feature::LOOP_BACK | feature::ONE_SHOT | feature::HW_TIMESTAMP;
+const MODE_FLAGS: u32 = feature::LISTEN_ONLY | feature::LOOP_BACK | feature::ONE_SHOT | feature::HW_TIMESTAMP | feature::BERR_REPORTING;
 
 /// The error counters' warning level.
 const WARNING_LEVEL: u8 = 96;
@@ -168,7 +168,7 @@ impl Control {
             (false, true) => Mode::Loopback,
             (true, true) => Mode::SilentLoopback,
         };
-        let config = Config::new(timing).with_mode(mode).with_retransmit(flags & feature::ONE_SHOT == 0);
+        let config = Config::new(timing).with_mode(mode).with_retransmit(flags & feature::ONE_SHOT == 0).with_bus_errors(flags & feature::BERR_REPORTING != 0);
         self.shared.command.signal(Command::Start {
             config,
             timestamps: flags & feature::HW_TIMESTAMP != 0,
@@ -183,6 +183,15 @@ fn is_gs_usb(req: &Request) -> bool {
 }
 
 impl Handler for Control {
+    /// On USB suspend the channel leaves the bus, as candleLight's does: the
+    /// host can't take its frames. Linux re-probes the device on resume.
+    fn suspended(&mut self, suspended: bool) {
+        if suspended {
+            info!("gs_usb: USB suspended, leaving the bus");
+            self.shared.command.signal(Command::Reset);
+        }
+    }
+
     fn control_out(&mut self, req: Request, data: &[u8]) -> Option<OutResponse> {
         if !is_gs_usb(&req) {
             return None;
@@ -327,7 +336,9 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
                 None => never::<()>().await,
             }
         };
-        match select4(read, can.next_event(), shared.command.wait(), timer).await {
+        // Bus errors come only when the host asked for them (BERR_REPORTING).
+        let events = select(can.next_event(), can.next_bus_error());
+        match select4(read, events, shared.command.wait(), timer).await {
             Either4::First(Ok(len)) => from_host(can, ep_in, &mut in_buf, &mut pending, &out_buf[..len], timestamps).await,
             Either4::First(Err(EndpointError::Disabled)) => {
                 info!("gs_usb: USB disabled, leaving the bus");
@@ -336,7 +347,7 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
                 ep_out.wait_enabled().await;
             }
             Either4::First(Err(EndpointError::BufferOverflow)) => warn!("gs_usb: OUT transfer too long"),
-            Either4::Second(event) => match event {
+            Either4::Second(Either::First(event)) => match event {
                 Event::Received(received) if running => {
                     let mut host = from_can(received.frame(), ECHO_ID_RX);
                     host.timestamp_us = timestamps.then(|| micros(*received.timestamp()));
@@ -366,6 +377,14 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
                     };
                 }
             },
+            Either4::Second(Either::Second(error)) => {
+                if running {
+                    let counters = can.error_counters().unwrap_or(ErrorCounters { transmit: 0, receive: 0 });
+                    let mut host = bus_error_frame(error, counters);
+                    host.timestamp_us = timestamps.then(|| micros(Instant::now()));
+                    write(ep_in, host.encode(&mut in_buf)).await;
+                }
+            }
             Either4::Third(Command::Start { config, timestamps: stamped }) => {
                 stop(can, &mut pending, &mut running, shared);
                 recovery = Recovery::Idle;
@@ -468,6 +487,33 @@ async fn report_state(ep_in: &mut impl EndpointIn, in_buf: &mut [u8; CLASSIC_TS_
     let mut host = error_frame(from, to, counters);
     host.timestamp_us = timestamps.then(|| micros(Instant::now()));
     write(ep_in, host.encode(in_buf)).await;
+}
+
+/// The error frame reporting a bus error, as candleLight writes it: a
+/// protocol violation of its kind (or no acknowledge), with the counters.
+fn bus_error_frame(error: BusError, counters: ErrorCounters) -> HostFrame {
+    let mut can_id = can_id::ERR | can_err::PROT | can_err::BUSERROR | can_err::CNT;
+    let mut data = [0; 8];
+    match error {
+        BusError::Stuff => data[2] = can_err::prot::STUFF,
+        BusError::Form => data[2] = can_err::prot::FORM,
+        BusError::Acknowledgement => can_id |= can_err::ACK,
+        BusError::BitRecessive => data[2] = can_err::prot::BIT1,
+        BusError::BitDominant => data[2] = can_err::prot::BIT0,
+        BusError::Crc => data[3] = can_err::prot::LOC_CRC_SEQ,
+        _ => {}
+    }
+    data[6] = counters.transmit;
+    data[7] = counters.receive;
+    HostFrame {
+        echo_id: ECHO_ID_RX,
+        can_id,
+        can_dlc: can_err::DLC,
+        channel: 0,
+        flags: 0,
+        data,
+        timestamp_us: None,
+    }
 }
 
 /// The frames the channel has lost so far: dropped from its event queue, or

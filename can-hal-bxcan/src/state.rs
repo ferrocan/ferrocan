@@ -11,10 +11,10 @@ use core::task::Waker;
 use can_hal::{BusState, CanFrame, Event, Timestamped, TransmitId};
 use critical_section::Mutex;
 
-use crate::Clock;
 use crate::frame::{self, Words};
 use crate::order::{MAILBOXES, Outstanding, Queue};
-use crate::registers::{ESR_BOFF, ESR_EPVF, MSR_ERRI, RFR_FMP, RFR_FOVR, RFR_RFOM, RegisterBlock, Regs, tsr_abrq, tsr_rqcp, tsr_txok};
+use crate::registers::{ESR_BOFF, ESR_EPVF, ESR_LEC_SHIFT, LEC_SOFTWARE, MSR_ERRI, RFR_FMP, RFR_FOVR, RFR_RFOM, RegisterBlock, Regs, tsr_abrq, tsr_rqcp, tsr_txok};
+use crate::{BusError, Clock};
 
 /// The state a [`Can`](crate::Can) channel shares with its interrupt handler,
 /// with room for `N` events. Declare one per controller as a `static`, give it
@@ -32,6 +32,10 @@ pub(crate) struct Inner<T, const N: usize> {
     pub(crate) bus_state: BusState,
     pub(crate) waker: Option<Waker>,
     pub(crate) counts: Counts,
+    /// Whether bus errors are reported, and the latest not yet taken.
+    pub(crate) report_bus_errors: bool,
+    pub(crate) bus_error: Option<BusError>,
+    pub(crate) error_waker: Option<Waker>,
 }
 
 /// Running counts for [`Statistics`](can_hal::Statistics).
@@ -42,6 +46,7 @@ pub(crate) struct Counts {
     pub(crate) rx_dropped: u32,
     pub(crate) rx_overruns: u32,
     pub(crate) tx_failed: u32,
+    pub(crate) bus_errors: u32,
 }
 
 /// Something that happened, with the bit-time stamp of its start of frame.
@@ -72,12 +77,16 @@ impl<C: Clock, const N: usize> State<C, N> {
                 next_id: 0,
                 bus_state: BusState::ErrorActive,
                 waker: None,
+                report_bus_errors: false,
+                bus_error: None,
+                error_waker: None,
                 counts: Counts {
                     rx_frames: 0,
                     tx_frames: 0,
                     rx_dropped: 0,
                     rx_overruns: 0,
                     tx_failed: 0,
+                    bus_errors: 0,
                 },
             })),
         }
@@ -180,6 +189,18 @@ impl<T: Clone, const N: usize> Inner<T, N> {
         // also checked as events are read.
         if r.msr.read() & MSR_ERRI != 0 {
             r.msr.write(MSR_ERRI);
+        }
+        // A bus error, when they are reported. The code is then marked as
+        // set by software, so that the next error shows as new.
+        if self.report_bus_errors
+            && let Some(error) = BusError::from_lec((r.esr.read() >> ESR_LEC_SHIFT) & 0b111)
+        {
+            r.esr.write(LEC_SOFTWARE << ESR_LEC_SHIFT);
+            self.bus_error = Some(error);
+            self.counts.bus_errors += 1;
+            if let Some(waker) = self.error_waker.take() {
+                waker.wake();
+            }
         }
         self.update_bus_state(r);
     }
