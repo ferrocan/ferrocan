@@ -113,7 +113,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "can-hal-mcan"
+name = "can-hal-fdcan"
 version = "0.1.0"
 dependencies = [
  "can-hal-rs",
@@ -647,7 +647,7 @@ name = "ferrocan"
 version = "0.1.0"
 dependencies = [
  "can-hal-bxcan",
- "can-hal-mcan",
+ "can-hal-fdcan",
  "can-hal-rs",
  "cortex-m",
  "cortex-m-rt",
@@ -831,22 +831,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "windows-sys",
-]
-
-[[package]]
-name = "nucleo-g431kb"
-version = "0.1.0"
-dependencies = [
- "can-hal-mcan",
- "can-hal-rs",
- "cortex-m",
- "cortex-m-rt",
- "defmt 1.2.0",
- "defmt-rtt",
- "embassy-executor",
- "embassy-stm32",
- "embassy-time",
- "panic-probe",
 ]
 
 [[package]]

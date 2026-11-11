@@ -2,18 +2,18 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! [`Channel`] for `can-hal-mcan`: classic CAN, and CAN FD when the host
+//! [`Channel`] for `can-hal-fdcan`: classic CAN, and CAN FD when the host
 //! gives a data phase timing.
 
 use can_hal::{BusState, BusStatus, ConfirmedTransmit, ErrorCounters, Event, Frame, Recover, Statistics, TransmitId, TryTransmitError};
-use can_hal_mcan::{BitTiming, Can, Config, Error};
+use can_hal_fdcan::{BitTiming, Can, Config, Error};
 use embassy_time::Instant;
 
 use super::{BusError, Channel, Fault, Limits, Mode, Settings, Timing};
 use crate::board::{CAN_CLOCK_HZ, EmbassyClock};
 
 impl<const N: usize> Channel for Can<EmbassyClock, N> {
-    type Status = can_hal_mcan::Status<EmbassyClock, N>;
+    type Status = can_hal_fdcan::Status<EmbassyClock, N>;
 
     const CLOCK_HZ: u32 = CAN_CLOCK_HZ;
     /// NBTP: prescaler 1-512, seg1 1-256, seg2 1-128, SJW 1-128.
@@ -49,12 +49,12 @@ impl<const N: usize> Channel for Can<EmbassyClock, N> {
 
     async fn next_bus_error(&self) -> BusError {
         match Can::next_bus_error(self).await {
-            can_hal_mcan::BusError::Stuff => BusError::Stuff,
-            can_hal_mcan::BusError::Form => BusError::Form,
-            can_hal_mcan::BusError::Acknowledgement => BusError::Acknowledgement,
-            can_hal_mcan::BusError::BitRecessive => BusError::BitRecessive,
-            can_hal_mcan::BusError::BitDominant => BusError::BitDominant,
-            can_hal_mcan::BusError::Crc => BusError::Crc,
+            can_hal_fdcan::BusError::Stuff => BusError::Stuff,
+            can_hal_fdcan::BusError::Form => BusError::Form,
+            can_hal_fdcan::BusError::Acknowledgement => BusError::Acknowledgement,
+            can_hal_fdcan::BusError::BitRecessive => BusError::BitRecessive,
+            can_hal_fdcan::BusError::BitDominant => BusError::BitDominant,
+            can_hal_fdcan::BusError::Crc => BusError::Crc,
             _ => BusError::Other,
         }
     }
@@ -66,10 +66,10 @@ impl<const N: usize> Channel for Can<EmbassyClock, N> {
     fn start(&mut self, settings: &Settings) -> Result<(), Fault> {
         let timing = |t: Timing, make: fn(u16, u16, u8, u8) -> Result<BitTiming, Error>| make(t.prescaler, t.seg1, t.seg2, t.sjw).map_err(|_| Fault::InvalidTiming);
         let mode = match settings.mode {
-            Mode::Normal => can_hal_mcan::Mode::Normal,
-            Mode::Silent => can_hal_mcan::Mode::Silent,
-            Mode::Loopback => can_hal_mcan::Mode::Loopback,
-            Mode::SilentLoopback => can_hal_mcan::Mode::SilentLoopback,
+            Mode::Normal => can_hal_fdcan::Mode::Normal,
+            Mode::Silent => can_hal_fdcan::Mode::Silent,
+            Mode::Loopback => can_hal_fdcan::Mode::Loopback,
+            Mode::SilentLoopback => can_hal_fdcan::Mode::SilentLoopback,
         };
         let mut config = Config::new(timing(settings.nominal, BitTiming::nominal)?).with_mode(mode).with_retransmit(settings.retransmit).with_bus_errors(settings.bus_errors);
         if let Some(data) = settings.data {

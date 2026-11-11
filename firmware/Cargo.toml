@@ -39,7 +39,7 @@ bxcan = ["dep:can-hal-bxcan"]
 # The STM32G4 boards also set the stack pointer and vector table offset at
 # reset: the ROM bootloader's DFU `:leave` jumps to the firmware with its own
 # still in place.
-fdcan = ["dep:can-hal-mcan", "cortex-m-rt/set-sp", "cortex-m-rt/set-vtor"]
+fdcan = ["dep:can-hal-fdcan", "cortex-m-rt/set-sp", "cortex-m-rt/set-vtor"]
 # On a panic, restart in the ROM bootloader, so that a board with no debug
 # probe can be reflashed over USB. Boards with a probe use panic-probe
 # instead, for its backtrace.
@@ -47,8 +47,9 @@ panic-dfu = []
 
 [dependencies]
 can-hal = { version = "0.4.3", path = "../../can-hal-rs/can-hal", package = "can-hal-rs", default-features = false }
-can-hal-bxcan = { path = "../can-hal-bxcan", features = ["defmt"], optional = true }
-can-hal-mcan = { path = "../can-hal-mcan", features = ["defmt"], optional = true }
+# The drivers live in can-hal-embedded, checked out beside this repository.
+can-hal-bxcan = { path = "../../can-hal-embedded/can-hal-bxcan", features = ["defmt"], optional = true }
+can-hal-fdcan = { path = "../../can-hal-embedded/can-hal-fdcan", features = ["defmt"], optional = true }
 gs_usb_protocol = { path = "../gs_usb_protocol" }
 embassy-stm32 = { version = "0.6.0", features = ["defmt", "memory-x", "time-driver-tim2", "unstable-pac"] }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "defmt"] }

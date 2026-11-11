@@ -12,14 +12,16 @@ the frame is on the bus rather than when it is queued.
 # Crates
 
 - `firmware` (package `ferrocan`): the firmware, one cargo feature per board.
-- `can-hal-bxcan`: a [can-hal](https://github.com/can-hal-rs-contributors/can-hal-rs)
-  backend for STM32's bxCAN, with no HAL dependency. Its channel confirms
-  transmissions (`ConfirmedTransmit` and `ReceiveEvents`): a frame is reported
-  sent when the controller says it was acknowledged, in bus order with the
-  frames received. It uses the confirmed-transmission traits on our fork's
-  `aeolionics` branch, checked out beside this repository.
 - `gs_usb_protocol`: the gs_usb wire format (requests, structures, host
   frames), for both device and host, with no dependencies.
+
+The CAN drivers, `can-hal-bxcan` (bxCAN) and `can-hal-fdcan` (FDCAN), are
+[can-hal](https://github.com/can-hal-rs-contributors/can-hal-rs) backends in
+[can-hal-embedded](https://github.com/aeolionics-rs/can-hal-embedded), checked
+out beside this repository, as is our can-hal fork (`../can-hal-rs`, on its
+`aeolionics` branch) for the confirmed-transmission traits they use. Their
+channels confirm transmissions: a frame is reported sent when the controller
+says it was acknowledged, in bus order with the frames received.
 
 # Status
 

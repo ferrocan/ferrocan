@@ -6,7 +6,7 @@
 //! time, chosen by cargo feature.
 //!
 //! The CAN controller is driven by a can-hal backend, `can-hal-bxcan` on the
-//! STM32F0 and `can-hal-mcan` on the STM32G4; the chip's module does what is
+//! STM32F0 and `can-hal-fdcan` on the STM32G4; the chip's module does what is
 //! chip-specific: its clocks, its pins, its interrupts and its bootloader.
 
 use embassy_stm32::gpio::{Level, Output};
@@ -72,7 +72,7 @@ macro_rules! embassy_clock {
 #[cfg(feature = "bxcan")]
 embassy_clock!(can_hal_bxcan);
 #[cfg(feature = "fdcan")]
-embassy_clock!(can_hal_mcan);
+embassy_clock!(can_hal_fdcan);
 
 /// An LED, and the pin level that lights it.
 pub struct Led {

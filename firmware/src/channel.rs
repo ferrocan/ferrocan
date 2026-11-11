@@ -4,7 +4,7 @@
 
 //! What the `gs_usb` bridge needs of a CAN channel, whichever controller
 //! drives it: [`Channel`], implemented for `can-hal-bxcan`'s channel and
-//! `can-hal-mcan`'s.
+//! `can-hal-fdcan`'s.
 //!
 //! The bridge works with can-hal's [`Frame`], classic or FD, and its own
 //! [`Settings`], which each implementation turns into its backend's.
@@ -18,7 +18,7 @@ use gs_usb_protocol::DeviceBittiming;
 #[cfg(feature = "bxcan")]
 mod bxcan;
 #[cfg(feature = "fdcan")]
-mod mcan;
+mod fdcan;
 
 /// A bit timing as the host gives it, checked against a controller's
 /// [`Limits`]: `seg1` is the propagation and phase 1 segments together.

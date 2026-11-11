@@ -2,10 +2,10 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The STM32G431 boards: FDCAN, driven by `can-hal-mcan`.
+//! The STM32G431 boards: FDCAN, driven by `can-hal-fdcan`.
 
 use can_hal::SamplePoint;
-use can_hal_mcan::{BitTiming, Can, Config, Peripheral, State};
+use can_hal_fdcan::{BitTiming, Can, Config, Peripheral, State};
 use embassy_stm32::Peri;
 use embassy_stm32::gpio::{Flex, Level, Output, Speed};
 use embassy_stm32::interrupt::typelevel::{FDCAN1_IT0, Handler, Interrupt};
