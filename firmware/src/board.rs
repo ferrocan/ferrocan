@@ -72,18 +72,58 @@ embassy_stm32::bind_interrupts!(struct Irqs {
     USB => usb::InterruptHandler<USB>;
 });
 
+/// An LED, and the pin level that lights it.
+pub struct Led {
+    pin: Output<'static>,
+    lit: Level,
+}
+
+impl Led {
+    /// An LED on `pin`, lit by `lit`, starting dark.
+    fn new(pin: Output<'static>, lit: Level) -> Self {
+        let mut led = Self { pin, lit };
+        led.set(false);
+        led
+    }
+
+    /// Lights the LED, or darkens it.
+    pub fn set(&mut self, on: bool) {
+        let level = if on { self.lit } else { invert(self.lit) };
+        self.pin.set_level(level);
+    }
+
+    /// Changes the LED over: lit to dark, or dark to lit.
+    pub fn toggle(&mut self) {
+        self.pin.toggle();
+    }
+}
+
+const fn invert(level: Level) -> Level {
+    match level {
+        Level::Low => Level::High,
+        Level::High => Level::Low,
+    }
+}
+
+/// The board's LEDs: one for frames received, and one for frames sent where
+/// the board has two (the one-LED boards show both on `rx`).
+pub struct Leds {
+    /// Frames received, and the heartbeat.
+    pub rx: Led,
+    /// Frames sent, if the board has a second LED.
+    pub tx: Option<Led>,
+}
+
 /// The board's peripherals, as the firmware uses them.
 pub struct Board {
-    /// The activity LED.
-    pub led: Output<'static>,
+    /// The LEDs.
+    pub leds: Leds,
     /// The CAN controller, its clock on and its pins set: give it to
     /// `can_hal_bxcan::Can::new` with [`CAN_STATE`], then
     /// [`unmask_can_interrupt`].
     pub can: Peripheral,
     /// The USB device controller, on PA11 and PA12.
     pub usb: usb::Driver<'static, USB>,
-    /// An LED the firmware doesn't use yet, held off.
-    _dark: Option<Output<'static>>,
     /// Held so that nothing else takes the controller or its pins.
     _can_parts: (Peri<'static, CAN>, Flex<'static>, Flex<'static>),
 }
@@ -113,11 +153,13 @@ impl Board {
     fn take(p: embassy_stm32::Peripherals) -> Self {
         let (can, rx, tx) = can_parts(p.CAN, Flex::new(p.PB8), Flex::new(p.PB9), Irqs);
         Self {
-            led: Output::new(p.PA5, Level::Low, Speed::Low),
+            leds: Leds {
+                rx: Led::new(Output::new(p.PA5, Level::Low, Speed::Low), Level::High),
+                tx: None,
+            },
             // SAFETY: the board holds the controller, so nothing else uses it.
             can: unsafe { Peripheral::new(embassy_stm32::pac::CAN.as_ptr() as usize) },
             usb: usb::Driver::new(p.USB, Irqs, p.PA12, p.PA11),
-            _dark: None,
             _can_parts: (can, rx, tx),
         }
     }
@@ -129,11 +171,13 @@ impl Board {
     fn take(p: embassy_stm32::Peripherals) -> Self {
         let (can, rx, tx) = can_parts(p.CAN, Flex::new(p.PB8), Flex::new(p.PB9), Irqs);
         Self {
-            led: Output::new(p.PC6, Level::Low, Speed::Low),
+            leds: Leds {
+                rx: Led::new(Output::new(p.PC6, Level::Low, Speed::Low), Level::High),
+                tx: None,
+            },
             // SAFETY: the board holds the controller, so nothing else uses it.
             can: unsafe { Peripheral::new(embassy_stm32::pac::CAN.as_ptr() as usize) },
             usb: usb::Driver::new(p.USB, Irqs, p.PA12, p.PA11),
-            _dark: None,
             _can_parts: (can, rx, tx),
         }
     }
@@ -145,17 +189,18 @@ impl Board {
     /// board has them; CAN on PB8 (RXD) and PB9 (TXD) to its transceiver,
     /// whose standby pin is tied low. SW1 is two switches: the 120 Ω
     /// termination, and BOOT0 for the ROM bootloader. A 5-pin header (H1)
-    /// has SWD. The RX LED is the activity LED for now; the TX LED stays
-    /// dark.
+    /// has SWD. The RX LED shows frames received, the TX LED frames sent.
     #[cfg(feature = "sh-c30a")]
     fn take(p: embassy_stm32::Peripherals) -> Self {
         let (can, rx, tx) = can_parts(p.CAN, Flex::new(p.PB8), Flex::new(p.PB9), Irqs);
         Self {
-            led: Output::new(p.PB1, Level::High, Speed::Low),
+            leds: Leds {
+                rx: Led::new(Output::new(p.PB1, Level::High, Speed::Low), Level::Low),
+                tx: Some(Led::new(Output::new(p.PB0, Level::High, Speed::Low), Level::Low)),
+            },
             // SAFETY: the board holds the controller, so nothing else uses it.
             can: unsafe { Peripheral::new(embassy_stm32::pac::CAN.as_ptr() as usize) },
             usb: usb::Driver::new(p.USB, Irqs, p.PA12, p.PA11),
-            _dark: Some(Output::new(p.PB0, Level::High, Speed::Low)),
             _can_parts: (can, rx, tx),
         }
     }

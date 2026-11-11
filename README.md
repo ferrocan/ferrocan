@@ -57,8 +57,23 @@ complete in each direction; and with the Leaf saturating the bus (about 1700
 eight-byte extended frames a second) ferrocan receives every frame, with no
 overruns or errors.
 
-Not yet: single-shot on a working bus, error frames and recovery from a real
-fault, CAN FD on the G431.
+Against the Leaf it also passed single-shot (sent once when acknowledged, given
+up after one attempt when not) and a real fault: with the Leaf at the wrong
+bit rate, ferrocan went error passive on transmit and receive, bus-off,
+restarted by itself, and returned to error active once the Leaf was put right,
+with Linux following each step from its error frames.
+
+The LEDs show what the adapter is doing: a brief heartbeat each second while
+stopped; dark on the bus, flashing for each frame received (RX) and sent (TX);
+blinking fast to identify. A firmware that panics on a board with no debug
+probe restarts in the ROM bootloader, so it can still be reflashed over USB.
+
+For Windows, Microsoft OS 2.0 descriptors ask for WinUSB on both interfaces,
+with candleLight's device interface GUID on the gs_usb one, so Windows should
+need no driver and candleLight tools should find it. The descriptors read
+correctly, but this hasn't been tried on Windows yet.
+
+Not yet: CAN FD on the G431.
 
 # Building
 

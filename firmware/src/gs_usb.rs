@@ -64,6 +64,10 @@ pub struct Shared {
     running: AtomicBool,
     /// Whether the host asked the device to identify itself.
     identify: AtomicBool,
+    /// A frame was received since the LEDs last looked.
+    rx_activity: AtomicBool,
+    /// A frame was sent since the LEDs last looked.
+    tx_activity: AtomicBool,
 }
 
 impl Shared {
@@ -74,7 +78,30 @@ impl Shared {
             command: Signal::new(),
             running: AtomicBool::new(false),
             identify: AtomicBool::new(false),
+            rx_activity: AtomicBool::new(false),
+            tx_activity: AtomicBool::new(false),
         }
+    }
+
+    /// Whether the channel is on the bus.
+    pub fn running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
+    /// Whether a frame was received since the last call. (The Cortex-M0 has
+    /// no atomic swap: a frame between the load and the store goes unseen,
+    /// and its blink with it.)
+    pub fn take_rx_activity(&self) -> bool {
+        let seen = self.rx_activity.load(Ordering::Relaxed);
+        self.rx_activity.store(false, Ordering::Relaxed);
+        seen
+    }
+
+    /// Whether a frame was sent since the last call.
+    pub fn take_tx_activity(&self) -> bool {
+        let seen = self.tx_activity.load(Ordering::Relaxed);
+        self.tx_activity.store(false, Ordering::Relaxed);
+        seen
     }
 
     /// Whether the host asked the device to identify itself: blink, say.
@@ -320,22 +347,11 @@ pub async fn bridge(can: &mut CanChannel, ep_in: &mut impl EndpointIn, ep_out: &
                         host.flags |= frame_flag::OVERFLOW;
                         lost = now_lost;
                     }
+                    shared.rx_activity.store(true, Ordering::Relaxed);
                     write(ep_in, host.encode(&mut in_buf)).await;
                 }
                 Event::Received(_) => {}
-                Event::Transmitted { id, outcome } => {
-                    let Some(slot) = pending.iter_mut().find(|p| p.as_ref().is_some_and(|p| p.id == id)) else { continue };
-                    let Some(Pending { frame: mut echo, .. }) = slot.take() else { continue };
-                    let at = match outcome {
-                        Outcome::Sent(at) => at,
-                        other => {
-                            debug!("gs_usb: frame {} not sent: {}", echo.echo_id, defmt::Debug2Format(&other));
-                            Instant::now()
-                        }
-                    };
-                    echo.timestamp_us = timestamps.then(|| micros(at));
-                    write(ep_in, echo.encode(&mut in_buf)).await;
-                }
+                Event::Transmitted { id, outcome } => echo(ep_in, &mut in_buf, &mut pending, id, outcome, timestamps, shared).await,
                 Event::BusStateChanged(state) => {
                     let counters = can.error_counters().unwrap_or(ErrorCounters { transmit: 0, receive: 0 });
                     info!("gs_usb: bus {}, counters {}/{}", defmt::Debug2Format(&state), counters.transmit, counters.receive);
@@ -426,6 +442,25 @@ async fn recover(can: &mut CanChannel, ep_in: &mut impl EndpointIn, in_buf: &mut
         Recovery::Waiting(_) => Recovery::Waiting(Instant::now() + RECOVERY_POLL),
         Recovery::Idle => Recovery::Idle,
     }
+}
+
+/// Echoes the host's frame `id` now that the channel has reported it: sent,
+/// or not (the echo frees the host's slot either way).
+async fn echo(ep_in: &mut impl EndpointIn, in_buf: &mut [u8; CLASSIC_TS_LEN], pending: &mut [Option<Pending>; 3], id: TransmitId, outcome: Outcome<Instant>, timestamps: bool, shared: &Shared) {
+    let Some(slot) = pending.iter_mut().find(|p| p.as_ref().is_some_and(|p| p.id == id)) else { return };
+    let Some(Pending { frame: mut echo, .. }) = slot.take() else { return };
+    let at = match outcome {
+        Outcome::Sent(at) => {
+            shared.tx_activity.store(true, Ordering::Relaxed);
+            at
+        }
+        other => {
+            debug!("gs_usb: frame {} not sent: {}", echo.echo_id, defmt::Debug2Format(&other));
+            Instant::now()
+        }
+    };
+    echo.timestamp_us = timestamps.then(|| micros(at));
+    write(ep_in, echo.encode(in_buf)).await;
 }
 
 /// Tells the host the bus state went from `from` to `to`.

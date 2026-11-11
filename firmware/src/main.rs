@@ -18,17 +18,31 @@ use can_hal_bxcan::{BitTiming, Can, Config};
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_futures::join::join4;
-use embassy_time::Timer;
+use embassy_time::{Duration, Ticker, Timer};
 use embassy_usb::Builder;
+use embassy_usb::msos::{self, windows_version};
 use embassy_usb::driver::{Direction, EndpointAddress};
-use ferrocan::board::{self, Board, CAN_CLOCK_HZ, CAN_STATE};
+use ferrocan::board::{self, Board, CAN_CLOCK_HZ, CAN_STATE, Leds};
 use ferrocan::dfu::{self, Dfu};
-use ferrocan::gs_usb::{self, Control, SHARED};
+use ferrocan::gs_usb::{self, Control, SHARED, Shared};
 use gs_usb_protocol::{PRODUCT_ID, VENDOR_ID};
-use {defmt_rtt as _, panic_probe as _};
+use defmt_rtt as _;
+#[cfg(not(feature = "panic-dfu"))]
+use panic_probe as _;
 
 /// Bulk packets: a classic frame, with its timestamp, is 24 bytes.
 const MAX_PACKET: u16 = 64;
+
+/// The vendor request Windows reads the Microsoft OS 2.0 descriptors with:
+/// candleLight's, clear of the `gs_usb` requests.
+const MS_VENDOR_CODE: u8 = 0x20;
+
+/// The device interface GUID Windows gives the `gs_usb` interface: candleLight's,
+/// so that Windows tools that look for candleLight devices find this one.
+const GS_USB_INTERFACE_GUIDS: &[&str] = &["{c15b4308-04d3-11e6-b3ea-6057189e6443}"];
+
+/// The device interface GUID for the DFU interface, ferrocan's own.
+const DFU_INTERFACE_GUIDS: &[&str] = &["{02abe934-d944-4a48-b2ea-67095526777d}"];
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -51,13 +65,20 @@ async fn main(_spawner: Spawner) {
     config.max_packet_size_0 = 64;
 
     let mut config_descriptor = [0; 128];
-    let mut bos_descriptor = [0; 32];
+    // The BOS carries the Microsoft OS 2.0 platform capability (28 bytes).
+    let mut bos_descriptor = [0; 64];
     let mut control_buf = [0; 64];
+    let mut msos_descriptor = [0; 384];
     let mut control = Control::new(&SHARED, can.status());
     let mut dfu = Dfu::new();
-    let mut builder = Builder::new(board.usb, config, &mut config_descriptor, &mut bos_descriptor, &mut [], &mut control_buf);
+    let mut builder = Builder::new(board.usb, config, &mut config_descriptor, &mut bos_descriptor, &mut msos_descriptor, &mut control_buf);
     builder.handler(&mut control);
+    // Windows installs WinUSB for both interfaces from these, with no driver
+    // package, as candleLight's descriptors have it do.
+    builder.msos_descriptor(windows_version::WIN8_1, MS_VENDOR_CODE);
     let mut function = builder.function(0xFF, 0xFF, 0xFF);
+    function.msos_feature(msos::CompatibleIdFeatureDescriptor::new("WINUSB", ""));
+    function.msos_feature(msos::RegistryPropertyFeatureDescriptor::new("DeviceInterfaceGUIDs", msos::PropertyData::RegMultiSz(GS_USB_INTERFACE_GUIDS)));
     let mut interface = function.interface();
     let mut alt = interface.alt_setting(0xFF, 0xFF, 0xFF, None);
     // EP1 IN and EP2 OUT, as candleLight has them and older kernels expect.
@@ -67,6 +88,8 @@ async fn main(_spawner: Spawner) {
 
     // Interface 1, DFU runtime: `dfu-util -e` restarts in the ROM bootloader.
     let mut function = builder.function(dfu::CLASS, dfu::SUBCLASS, dfu::PROTOCOL);
+    function.msos_feature(msos::CompatibleIdFeatureDescriptor::new("WINUSB", ""));
+    function.msos_feature(msos::RegistryPropertyFeatureDescriptor::new("DeviceInterfaceGUIDs", msos::PropertyData::RegMultiSz(DFU_INTERFACE_GUIDS)));
     let mut interface = function.interface();
     dfu.set_interface(interface.interface_number());
     let mut alt = interface.alt_setting(dfu::CLASS, dfu::SUBCLASS, dfu::PROTOCOL, None);
@@ -75,14 +98,7 @@ async fn main(_spawner: Spawner) {
     builder.handler(&mut dfu);
     let mut usb = builder.build();
 
-    // A slow blink while running; fast while the host asks the device to
-    // identify itself (`ethtool -p`).
-    let blink = async {
-        loop {
-            board.led.toggle();
-            Timer::after_millis(if SHARED.identifying() { 100 } else { 500 }).await;
-        }
-    };
+    let blink = show(&mut board.leds, &SHARED);
     let detach = async {
         dfu::DETACH.wait().await;
         // Time for the request's status stage to reach the host.
@@ -107,4 +123,49 @@ fn serial_number() -> [u8; 24] {
         }
     }
     serial
+}
+
+/// How often the LEDs are updated.
+const LED_TICK: Duration = Duration::from_millis(10);
+/// A frame's flash, in ticks.
+const FLASH_TICKS: u32 = 3;
+/// The heartbeat while stopped: a flash of this many ticks every
+/// `HEARTBEAT_TICKS`.
+const HEARTBEAT_ON_TICKS: u32 = 5;
+const HEARTBEAT_TICKS: u32 = 100;
+/// The identify blink's half period, in ticks.
+const IDENTIFY_TICKS: u32 = 10;
+
+/// Drives the LEDs. Stopped: a brief heartbeat each second. On the bus: dark,
+/// flashing for frames received (`rx`) and frames sent (`tx`, or `rx` on a
+/// one-LED board). Identifying (`ethtool -p`): all blinking fast.
+async fn show(leds: &mut Leds, shared: &Shared) -> ! {
+    let mut ticker = Ticker::every(LED_TICK);
+    let mut tick: u32 = 0;
+    let (mut rx_until, mut tx_until) = (0, 0);
+    loop {
+        if shared.take_rx_activity() {
+            rx_until = tick + FLASH_TICKS;
+        }
+        if shared.take_tx_activity() {
+            tx_until = tick + FLASH_TICKS;
+        }
+        let (rx, tx) = if shared.identifying() {
+            let on = (tick / IDENTIFY_TICKS).is_multiple_of(2);
+            (on, on)
+        } else if shared.running() {
+            (tick < rx_until, tick < tx_until)
+        } else {
+            (tick % HEARTBEAT_TICKS < HEARTBEAT_ON_TICKS, false)
+        };
+        match leds.tx.as_mut() {
+            Some(tx_led) => {
+                leds.rx.set(rx);
+                tx_led.set(tx);
+            }
+            None => leds.rx.set(rx || tx),
+        }
+        ticker.next().await;
+        tick = tick.wrapping_add(1);
+    }
 }

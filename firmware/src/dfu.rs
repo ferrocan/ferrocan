@@ -61,6 +61,18 @@ pub fn reboot_into_bootloader() -> ! {
     SCB::sys_reset()
 }
 
+/// On a panic, restarts in the ROM bootloader rather than halting: on a board
+/// with no debug probe, a firmware that panics at start would otherwise
+/// leave nothing on USB, and only the boot switch would bring it back. In
+/// the bootloader it shows as ST's DFU device (`0483:df11`), ready for
+/// `dfu-util`. A power cycle runs the firmware again.
+#[cfg(feature = "panic-dfu")]
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    defmt::error!("panic: {}, restarting in the bootloader", defmt::Display2Format(info));
+    reboot_into_bootloader()
+}
+
 /// If the last reset was [`reboot_into_bootloader`]'s, jumps to the ROM
 /// bootloader. Call it first in `main`, before any peripheral is set up, so
 /// that the bootloader starts from the chip's reset state.

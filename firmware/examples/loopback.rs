@@ -28,7 +28,9 @@ use defmt::{Debug2Format, error, info};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer, with_timeout};
 use ferrocan::board::{self, Board, CAN_CLOCK_HZ, CAN_EVENTS, CAN_STATE, EmbassyClock};
-use {defmt_rtt as _, panic_probe as _};
+use defmt_rtt as _;
+#[cfg(not(feature = "panic-dfu"))]
+use panic_probe as _;
 
 type Channel = Can<EmbassyClock, CAN_EVENTS>;
 
@@ -64,7 +66,7 @@ async fn main(_spawner: Spawner) {
 
     let period = if failures == 0 { 500 } else { 100 };
     loop {
-        board.led.toggle();
+        board.leds.rx.toggle();
         Timer::after_millis(period).await;
     }
 }
