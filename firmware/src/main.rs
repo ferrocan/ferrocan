@@ -42,11 +42,11 @@ async fn main(_spawner: Spawner) {
     let mut can = Can::new(board.can, &CAN_STATE, Config::new(timing)).unwrap();
     board::unmask_can_interrupt();
 
+    let serial = serial_number();
     let mut config = embassy_usb::Config::new(VENDOR_ID, PRODUCT_ID);
     config.manufacturer = Some("Aeolionics");
     config.product = Some("ferrocan gs_usb adapter");
-    // The chip's unique ID, in hex.
-    config.serial_number = Some(embassy_stm32::uid::uid_hex());
+    config.serial_number = core::str::from_utf8(&serial).ok();
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 
@@ -90,4 +90,21 @@ async fn main(_spawner: Spawner) {
         dfu::reboot_into_bootloader()
     };
     join4(usb.run(), gs_usb::bridge(&mut can, &mut ep_in, &mut ep_out, &SHARED), blink, detach).await;
+}
+
+/// The serial number: the chip's 96-bit unique ID as three 32-bit words in
+/// hex, as candleLight writes it, so that a board keeps its serial number,
+/// and the names hosts give it, when it changes firmware. (Embassy's
+/// `uid_hex` writes the bytes in memory order instead.)
+fn serial_number() -> [u8; 24] {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    let uid = embassy_stm32::uid::uid();
+    let mut serial = [0; 24];
+    for (word, out) in uid.as_chunks::<4>().0.iter().zip(serial.as_chunks_mut::<8>().0) {
+        let value = u32::from_le_bytes(*word);
+        for (i, digit) in out.iter_mut().enumerate() {
+            *digit = DIGITS[((value >> (28 - 4 * i)) & 0xF) as usize];
+        }
+    }
+    serial
 }

@@ -8,6 +8,9 @@ clippy-nucleo-f072rb = "clippy -p ferrocan --target thumbv6m-none-eabi --feature
 build-disco-f072b = "build -p ferrocan --target thumbv6m-none-eabi --features disco-f072b"
 run-disco-f072b = ["run", "--config", "env.PROBE_RS_PROBE='0483:3748'", "-p", "ferrocan", "--target", "thumbv6m-none-eabi", "--features", "disco-f072b"]
 clippy-disco-f072b = "clippy -p ferrocan --target thumbv6m-none-eabi --features disco-f072b"
+# The SH-C30A has no debug probe: flash it over USB with dfu-util (README).
+build-sh-c30a = "build -p ferrocan --release --target thumbv6m-none-eabi --features sh-c30a"
+clippy-sh-c30a = "clippy -p ferrocan --target thumbv6m-none-eabi --features sh-c30a"
 
 # Flash with probe-rs through the board's on-board ST-LINK, which each run
 # alias names (PROBE_RS_PROBE: the Nucleo's V2-1 is 0483:374b, the

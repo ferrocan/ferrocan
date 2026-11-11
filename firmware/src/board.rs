@@ -17,9 +17,9 @@ use embassy_stm32::peripherals::{CAN, USB};
 use embassy_stm32::rcc::{self, Hsi48Config, Sysclk};
 use embassy_stm32::usb;
 
-#[cfg(not(any(feature = "nucleo-f072rb", feature = "disco-f072b")))]
+#[cfg(not(any(feature = "nucleo-f072rb", feature = "disco-f072b", feature = "sh-c30a")))]
 compile_error!("Build for a board, through its cargo alias, such as `cargo build-disco-f072b`.");
-#[cfg(all(feature = "nucleo-f072rb", feature = "disco-f072b"))]
+#[cfg(any(all(feature = "nucleo-f072rb", feature = "disco-f072b"), all(feature = "nucleo-f072rb", feature = "sh-c30a"), all(feature = "disco-f072b", feature = "sh-c30a")))]
 compile_error!("Build for one board at a time.");
 
 /// The ROM bootloader: the `STM32F07x`'s system memory, its vector table
@@ -82,6 +82,8 @@ pub struct Board {
     pub can: Peripheral,
     /// The USB device controller, on PA11 and PA12.
     pub usb: usb::Driver<'static, USB>,
+    /// An LED the firmware doesn't use yet, held off.
+    _dark: Option<Output<'static>>,
     /// Held so that nothing else takes the controller or its pins.
     _can_parts: (Peri<'static, CAN>, Flex<'static>, Flex<'static>),
 }
@@ -115,6 +117,7 @@ impl Board {
             // SAFETY: the board holds the controller, so nothing else uses it.
             can: unsafe { Peripheral::new(embassy_stm32::pac::CAN.as_ptr() as usize) },
             usb: usb::Driver::new(p.USB, Irqs, p.PA12, p.PA11),
+            _dark: None,
             _can_parts: (can, rx, tx),
         }
     }
@@ -130,6 +133,29 @@ impl Board {
             // SAFETY: the board holds the controller, so nothing else uses it.
             can: unsafe { Peripheral::new(embassy_stm32::pac::CAN.as_ptr() as usize) },
             usb: usb::Driver::new(p.USB, Irqs, p.PA12, p.PA11),
+            _dark: None,
+            _can_parts: (can, rx, tx),
+        }
+    }
+
+    /// DSD TECH SH-C30A, a `CANable` V1.1 (its schematic, 2022-09-26): an
+    /// `STM32F072CB` with a crystal footprint (X1) that is likely unfitted, so
+    /// the internal oscillator; LEDs on PB0 (TXD) and PB1 (RXD), lit low
+    /// through 1 kΩ from 3.3 V, as upstream candleLight's `DSD_TECH_SH_C30A`
+    /// board has them; CAN on PB8 (RXD) and PB9 (TXD) to its transceiver,
+    /// whose standby pin is tied low. SW1 is two switches: the 120 Ω
+    /// termination, and BOOT0 for the ROM bootloader. A 5-pin header (H1)
+    /// has SWD. The RX LED is the activity LED for now; the TX LED stays
+    /// dark.
+    #[cfg(feature = "sh-c30a")]
+    fn take(p: embassy_stm32::Peripherals) -> Self {
+        let (can, rx, tx) = can_parts(p.CAN, Flex::new(p.PB8), Flex::new(p.PB9), Irqs);
+        Self {
+            led: Output::new(p.PB1, Level::High, Speed::Low),
+            // SAFETY: the board holds the controller, so nothing else uses it.
+            can: unsafe { Peripheral::new(embassy_stm32::pac::CAN.as_ptr() as usize) },
+            usb: usb::Driver::new(p.USB, Irqs, p.PA12, p.PA11),
+            _dark: Some(Output::new(p.PB0, Level::High, Speed::Low)),
             _can_parts: (can, rx, tx),
         }
     }

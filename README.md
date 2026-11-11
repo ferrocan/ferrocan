@@ -47,6 +47,9 @@ A DFU runtime interface beside the gs_usb one restarts the device in ST's ROM
 bootloader, so it can be reflashed over USB without its boot switch (see
 below).
 
+It runs on the DSD TECH SH-C30A (a CANable V1.1), flashed over USB from its
+stock candleLight firmware without the boot switch, keeping its serial number.
+
 Not yet: a real bus.
 
 # Building
@@ -57,6 +60,7 @@ Each board has cargo aliases, run from the repository's root:
 cargo build-nucleo-f072rb
 cargo run-nucleo-f072rb      # flash with probe-rs through the Nucleo's ST-LINK, then show the log
 cargo clippy-nucleo-f072rb
+cargo build-sh-c30a           # release image; flash it over USB as below
 ```
 
 # Flashing over USB
