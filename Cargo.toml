@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["firmware", "gs_usb_protocol"]
+members = ["firmware"]
 
 [workspace.package]
 version = "0.1.0"

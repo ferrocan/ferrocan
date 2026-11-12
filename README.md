@@ -12,8 +12,10 @@ the frame is on the bus rather than when it is queued.
 # Crates
 
 - `firmware` (package `ferrocan`): the firmware, one cargo feature per board.
-- `gs_usb_protocol`: the gs_usb wire format (requests, structures, host
-  frames), for both device and host, with no dependencies.
+
+The gs_usb wire format, `gs_usb_protocol`, lives in
+[can_usb_rs](https://github.com/aeolionics-rs/can_usb_rs) beside the host
+driver, `can_usb_gs`, and is checked out beside this repository.
 
 The CAN drivers, `can-hal-bxcan` (bxCAN) and `can-hal-fdcan` (FDCAN), are
 [can-hal](https://github.com/can-hal-rs-contributors/can-hal-rs) backends in

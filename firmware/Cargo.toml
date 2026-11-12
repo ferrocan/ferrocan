@@ -50,7 +50,7 @@ can-hal = { version = "0.4.3", path = "../../can-hal-rs/can-hal", package = "can
 # The drivers live in can-hal-embedded, checked out beside this repository.
 can-hal-bxcan = { path = "../../can-hal-embedded/can-hal-bxcan", features = ["defmt"], optional = true }
 can-hal-fdcan = { path = "../../can-hal-embedded/can-hal-fdcan", features = ["defmt"], optional = true }
-gs_usb_protocol = { path = "../gs_usb_protocol" }
+gs_usb_protocol = { path = "../../can_usb_rs/gs_usb_protocol" }
 embassy-stm32 = { version = "0.6.0", features = ["defmt", "memory-x", "time-driver-tim2", "unstable-pac"] }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "defmt"] }
 embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime", "tick-hz-1_000_000"] }
