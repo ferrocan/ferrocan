@@ -176,6 +176,16 @@ fn restore_hsi_trim() {
     unsafe { cr.write_volatile((cr.read_volatile() & !(0x1F << 3)) | (HSITRIM_DEFAULT << 3)) };
 }
 
+/// Resets the CAN controller through RCC, its clock left on, so that every
+/// register goes back to its reset value, the error counters among them:
+/// nothing else clears those (RM0091 gives the master reset bit only the
+/// `FMP` bits and `CAN_MCR`). Embassy's `enable_and_reset` isn't used, as it
+/// skips the reset of a peripheral it counts as already enabled.
+pub fn reset_can() {
+    embassy_stm32::pac::RCC.apb1rstr().modify(|w| w.set_canrst(true));
+    embassy_stm32::pac::RCC.apb1rstr().modify(|w| w.set_canrst(false));
+}
+
 /// Maps system memory at address 0, for the ROM bootloader: the Cortex-M0
 /// has no vector table offset register, so its vectors must be there, or the
 /// bootloader's interrupts would run this firmware's handlers.

@@ -76,7 +76,10 @@ impl<const N: usize> Channel for Can<EmbassyClock, N> {
             Mode::SilentLoopback => can_hal_bxcan::Mode::SilentLoopback,
         };
         let config = Config::new(timing).with_mode(mode).with_retransmit(settings.retransmit).with_bus_errors(settings.bus_errors);
-        self.reconfigure(config).map_err(|_| Fault::Controller)?;
+        // Every start as from power-on: nothing from before, the error
+        // counters at 0.
+        crate::board::reset_can();
+        self.reinitialize(config).map_err(|_| Fault::Controller)?;
         Can::start(self);
         Ok(())
     }

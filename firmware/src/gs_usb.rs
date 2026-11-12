@@ -6,7 +6,11 @@
 //! endpoints and the CAN channel.
 //!
 //! The host's frames go to the channel as they come, while it has room; the
-//! endpoint is not read otherwise, so USB holds the host back. Each is echoed
+//! endpoint is not read otherwise, so USB holds the host back, one packet
+//! late: the endpoint takes the next packet as soon as one is read, so it may
+//! hold one the bridge hasn't asked for. That packet, and any transfer half
+//! gathered, are discarded on reset and on start, so that nothing the host
+//! sent before reaches the bus after. Each is echoed
 //! to the host when the channel reports it, so an echo means the frame was
 //! acknowledged on the bus, not merely queued. A frame aborted or given up is
 //! echoed too, as Linux's `gs_usb` frees a transmit slot only on an echo; it
@@ -15,9 +19,11 @@
 use core::cell::RefCell;
 use core::future::pending as never;
 use core::sync::atomic::{AtomicBool, Ordering};
+use core::task::Poll;
 
 use can_hal::{BusState, BusStatus, CanFdFrame, CanFrame, CanId, ErrorCounters, Event, Frame, Outcome, TransmitId};
 use defmt::{debug, info, warn};
+use embassy_futures::poll_once;
 use embassy_futures::select::{Either, Either4, select, select4};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -388,7 +394,11 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
     let mut in_buf = [0u8; FD_TS_LEN];
 
     loop {
-        let room = running && pending.iter().any(Option::is_none);
+        // No frame is taken from the host while a start or reset waits: it
+        // may be one the host sent before, which the command discards. (The
+        // bridge can be held up writing to a host that has gone, while a
+        // new one has already asked for a reset.)
+        let room = running && !shared.command.signaled() && pending.iter().any(Option::is_none);
         let reading = room || out.is_partial();
         let packet = out.packet();
         let read = async { if reading { ep_out.read(packet).await } else { never::<Result<usize, EndpointError>>().await } };
@@ -412,8 +422,7 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
             }
             Either4::First(Err(EndpointError::Disabled)) => {
                 info!("gs_usb: USB disabled, leaving the bus");
-                out = OutTransfer::new();
-                stop(can, &mut pending, &mut running, shared);
+                stop(can, ep_out, &mut pending, &mut out, &mut running, shared);
                 recovery = Recovery::Idle;
                 ep_out.wait_enabled().await;
             }
@@ -451,7 +460,7 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
                 }
             }
             Either4::Third(Command::Start { settings, timestamps: stamped }) => {
-                stop(can, &mut pending, &mut running, shared);
+                stop(can, ep_out, &mut pending, &mut out, &mut running, shared);
                 recovery = Recovery::Idle;
                 match can.start(&settings) {
                     Ok(()) => {
@@ -466,7 +475,7 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
                 }
             }
             Either4::Third(Command::Reset) => {
-                stop(can, &mut pending, &mut running, shared);
+                stop(can, ep_out, &mut pending, &mut out, &mut running, shared);
                 recovery = Recovery::Idle;
                 info!("gs_usb: reset");
             }
@@ -534,6 +543,19 @@ impl OutTransfer {
     }
 }
 
+/// Discards what the host sent before a reset or a start: the packet the
+/// endpoint took without being asked (it is armed again as soon as one is
+/// read), and any transfer half gathered. A read that finds a packet waiting
+/// completes on its first poll; one that doesn't is dropped, which leaves the
+/// endpoint as it was.
+fn discard_out(ep_out: &mut impl EndpointOut, out: &mut OutTransfer) {
+    *out = OutTransfer::new();
+    let mut packet = [0u8; PACKET];
+    while let Poll::Ready(Ok(len)) = poll_once(ep_out.read(&mut packet)) {
+        debug!("gs_usb: discarded {} bytes the host sent before", len);
+    }
+}
+
 /// Hands a frame from the host to the channel, or, if this device can't send
 /// it, echoes it unsent so the host's slot is freed.
 async fn from_host<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, in_buf: &mut [u8; FD_TS_LEN], pending: &mut [Option<Pending>; 3], bytes: &[u8], timestamps: bool) {
@@ -541,6 +563,7 @@ async fn from_host<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, in_buf:
         warn!("gs_usb: undecodable frame of {} bytes", bytes.len());
         return;
     };
+    debug!("gs_usb: frame from the host, echo id {}, id {=u32:#x}", host.echo_id, host.can_id);
     let sent = match to_frame(&host) {
         Some(frame) => can.transmit(&frame),
         None => Err(Fault::FdUnsupported),
@@ -673,15 +696,17 @@ fn error_frame(from: BusState, to: BusState, counters: ErrorCounters) -> HostFra
     }
 }
 
-/// Leaves the bus and forgets the frames awaiting reports: the host has
-/// forgotten them too.
-fn stop<C: Channel>(can: &mut C, pending: &mut [Option<Pending>; 3], running: &mut bool, shared: &Shared) {
+/// Leaves the bus and forgets everything the host sent before: the frames
+/// awaiting reports, and what [`discard_out`] drops. The host has forgotten
+/// them too.
+fn stop<C: Channel>(can: &mut C, ep_out: &mut impl EndpointOut, pending: &mut [Option<Pending>; 3], out: &mut OutTransfer, running: &mut bool, shared: &Shared) {
     if *running && let Err(e) = can.stop() {
         warn!("gs_usb: can't stop the controller: {}", e);
     }
     *running = false;
     shared.running.store(false, Ordering::Relaxed);
     *pending = [const { None }; 3];
+    discard_out(ep_out, out);
 }
 
 /// Sends `bytes` to the host as one transfer: full packets, then the rest,

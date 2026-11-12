@@ -75,7 +75,10 @@ impl<const N: usize> Channel for Can<EmbassyClock, N> {
         if let Some(data) = settings.data {
             config = config.with_data(timing(data, BitTiming::data)?);
         }
-        self.reconfigure(config).map_err(|_| Fault::Controller)?;
+        // Every start as from power-on: nothing from before, the error
+        // counters at 0.
+        crate::board::reset_can();
+        self.reinitialize(config).map_err(|_| Fault::Controller)?;
         Can::start(self).map_err(|_| Fault::Controller)
     }
 

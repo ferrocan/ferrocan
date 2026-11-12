@@ -145,7 +145,9 @@ pub trait Channel {
     /// [`Fault::Controller`] if the controller doesn't stop.
     fn stop(&mut self) -> Result<(), Fault>;
 
-    /// Sets the channel up with `settings` and joins the bus.
+    /// Sets the channel up with `settings` and joins the bus, as from
+    /// power-on: the controller is reset, so nothing from before carries
+    /// over (frames, events, the error counters).
     ///
     /// # Errors
     ///

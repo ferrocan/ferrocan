@@ -171,6 +171,17 @@ fn restore_hsi_trim() {
     unsafe { icscr.write_volatile((icscr.read_volatile() & !(0x7F << 24)) | (HSITRIM_DEFAULT << 24)) };
 }
 
+/// Resets FDCAN through RCC, its clock left on, so that every register goes
+/// back to its reset value, the error counters among them: nothing else
+/// clears those (RM0440: setting `CCCR.INIT` leaves them unchanged). The
+/// kernel clock's source, in `RCC_CCIPR`, stays as it is. Embassy's
+/// `enable_and_reset` isn't used, as it skips the reset of a peripheral it
+/// counts as already enabled, which it does for FDCAN after the first.
+pub fn reset_can() {
+    embassy_stm32::pac::RCC.apb1rstr1().modify(|w| w.set_fdcanrst(true));
+    embassy_stm32::pac::RCC.apb1rstr1().modify(|w| w.set_fdcanrst(false));
+}
+
 /// Maps system memory at address 0, for the ROM bootloader, as ST advises
 /// before jumping to it.
 pub fn map_system_memory() {
