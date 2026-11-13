@@ -1,0 +1,28 @@
+{{!--
+SPDX-FileCopyrightText: 2026-2026. Aeolionics, LLC
+
+SPDX-License-Identifier: MIT OR Apache-2.0
+
+cargo-about's template for THIRD-PARTY-LICENSES.txt (plain text).
+--}}
+Third-party licences
+====================
+
+The firmware image includes the crates below. Their licences follow, each
+with the crates it covers.
+
+{{#each overview}}
+- {{name}} ({{id}}): {{count}} crate(s)
+{{/each}}
+{{#each licenses}}
+
+------------------------------------------------------------------------
+{{name}} ({{id}})
+
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} <{{crate.repository}}>{{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

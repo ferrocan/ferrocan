@@ -54,6 +54,7 @@ async fn main(_spawner: Spawner) {
     config.manufacturer = Some("Aeolionics");
     config.product = Some(ferrocan::board::PRODUCT);
     config.serial_number = core::str::from_utf8(&serial).ok();
+    config.device_release = ferrocan::version::BCD_DEVICE;
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 

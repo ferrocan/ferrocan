@@ -8,3 +8,6 @@
 
 # Local [patch] overrides (.cargo/config.toml includes it if present)
 .cargo/local.toml
+
+# Release images (scripts/release.sh)
+/dist

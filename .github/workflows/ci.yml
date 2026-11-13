@@ -43,3 +43,19 @@ jobs:
           tool: cargo-deny
       - run: cargo deny check
       - uses: fsfe/reuse-action@v5
+
+  # The release images as scripts/release.sh builds them: locked, with no
+  # local path left in them. Kept as an artifact for bench tests.
+  release-images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx@0.5.10,cargo-about@0.9.3
+      - run: scripts/release.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ferrocan-images
+          path: dist/

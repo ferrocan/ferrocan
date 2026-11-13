@@ -65,10 +65,6 @@ const OUT_BUF: usize = 2 * PACKET;
 /// The error counters' warning level.
 const WARNING_LEVEL: u8 = 96;
 
-/// The firmware's version, as `DEVICE_CONFIG` reports it. At least 2: Linux's
-/// `gs_usb` ignores the identify feature of firmware older than that, as
-/// candleLight's first releases had it broken.
-const SW_VERSION: u32 = 2;
 /// The hardware's version.
 const HW_VERSION: u32 = 1;
 
@@ -332,7 +328,7 @@ impl<C: Channel> Handler for Control<C> {
             Some(GsRequest::DeviceConfig) => InResponse::Accepted(
                 DeviceConfig {
                     icount: 0,
-                    sw_version: SW_VERSION,
+                    sw_version: crate::version::SW_VERSION,
                     hw_version: HW_VERSION,
                 }
                 .encode(buf),
