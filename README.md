@@ -5,9 +5,10 @@ USB to CAN adapter firmware for STM32, in Rust on [Embassy](https://embassy.dev)
 It speaks gs_usb, the protocol of candleLight and Linux's in-kernel `gs_usb`
 driver, so it works with SocketCAN out of the box.
 
-Planned: classic CAN on the STM32F072 (bxCAN; the DSD Tech SH-C30A), then
-CAN FD on the STM32G431 (FDCAN; the SH-C31A), with a transmit echo sent when
-the frame is on the bus rather than when it is queued.
+It runs on DSD TECH's SH-C30A and SH-C30G (STM32F072, bxCAN, classic CAN)
+and SH-C31A (STM32G431, FDCAN, CAN FD). Unlike candleLight, it echoes a
+frame to the host when the frame has been acknowledged on the bus, not when
+it has been queued.
 
 # Crates
 
@@ -54,63 +55,56 @@ it.
 
 # Status
 
-On the NUCLEO-F072RB and the 32F072BDISCOVERY, `can-hal-bxcan` passes its
-loopback example: every kind of classic frame (standard and extended, data and
-remote, DLC 0 to 15) is received back unchanged and reported sent, and reports
-keep their order through an abort.
+All three adapters work as gs_usb devices under Linux's `gs_usb` and with
+[`can_usb_gs`](https://github.com/aeolionics-rs/can_usb_rs), tested on real
+buses against a Kvaser Leaf Light, candleLight-based adapters and an M_CAN
+controller under Linux.
 
-On the Discovery, whose USB USER connector is the F072's own USB, the firmware
-is a gs_usb device that Linux's `gs_usb` binds to. In loopback, `cansend`
-frames of every kind come back echoed and received, and `cangen` bursts of
-2000 frames at 0.3 ms intervals arrive complete, each echo sent when the
-controller reports the frame acknowledged.
+- **Frames:** every kind of classic frame (standard and extended, data and
+  remote, every DLC) goes both ways unchanged, paced and with the bus
+  saturated (about 2000 frames a second at 250 kbit/s); 2000-frame bursts
+  arrive whole. On the SH-C31A, CAN FD at every length, with and without
+  bit rate switching and the error state indicator (tested at 500 kbit/s
+  and 2 Mbit/s).
+- **Echoes** reach the host once the frame is acknowledged, in bus order with
+  the frames received. Single-shot frames are sent once or given up after
+  one attempt.
+- **Errors** reach the host as error frames, as candleLight sends them:
+  error warning (at 96), error passive, bus-off and the restart, with the
+  error counters; lost frames set the overflow flag. Bus-off recovers by
+  itself after 100 ms, as candleLight and Kvaser's adapters do. With bus
+  error reporting on (`ip link … berr-reporting on`), each bus error is
+  reported. `GET_STATE` gives the live counters (`ip -details link show`).
+- **Each start is as from power-on:** the controller is reset, so a new
+  session begins with its error counters at zero and no frames left over.
+- **Identify** (`ethtool -p`) blinks the LEDs fast. Otherwise the LEDs are
+  dark on the bus and flash for each frame received (RX) and sent (TX), with
+  a brief heartbeat each second while stopped.
+- **DFU:** a DFU runtime interface beside the gs_usb one restarts the
+  adapter in ST's ROM bootloader, so it can be reflashed over USB without
+  its boot switch (see below). A firmware panic restarts it there too.
+- **Transmit confirmation**, an extension Linux doesn't use: a host that
+  turns it on is told when a frame wasn't sent, and why (given up, bus-off,
+  aborted; on bxCAN also lost arbitration or an error), and can withdraw a
+  pending frame. `can_usb_gs` supports it.
 
-Changes of bus state reach the host as error frames (error passive, bus-off,
-restarted, with the error counters), and lost frames as the overflow flag:
-with no bus attached, one frame takes the channel to error passive and
-bus-off, which Linux follows. After 100 ms bus-off the channel recovers by
-itself, as candleLight and Kvaser's adapters do, and Linux counts the restart.
-The host can read the bus state and error counters (`GET_STATE`, shown by
-`ip -details link show` as `berr-counter`), and ask the device to identify
-itself (`ethtool -p`), which blinks its LED fast.
+Limits:
 
-A DFU runtime interface beside the gs_usb one restarts the device in ST's ROM
-bootloader, so it can be reflashed over USB without its boot switch (see
-below).
+- CAN FD is bounded by USB full speed: gs_usb takes two USB packets per FD
+  frame, so the SH-C31A receives about 6000 short FD frames a second (stock
+  candleLight-based firmware about 7000); past that, frames are dropped and
+  the host is told with the overflow flag. Classic CAN and longer FD frames
+  are unaffected.
+- Not implemented: filters, the `BUS_OFF_RECOVERY` and `PAD_PKTS` requests,
+  more than one channel.
+- Windows: Microsoft OS 2.0 descriptors ask for WinUSB on both interfaces,
+  with candleLight's device interface GUID on the gs_usb one, so Windows
+  should need no driver and candleLight tools should find it. The
+  descriptors read correctly, but this hasn't been tried on Windows yet.
 
-It runs on the DSD TECH SH-C30A (a CANable V1.1), flashed over USB from its
-stock candleLight firmware without the boot switch, keeping its serial number.
-
-On a real bus at 250 kbit/s, the SH-C30A against a Kvaser Leaf Light v2 (both
-through Linux), frames of every kind go both ways unchanged, with each echo
-sent once the Leaf acknowledged the frame; 2000-frame bursts at 1 ms arrive
-complete in each direction; and with the Leaf saturating the bus (about 1700
-eight-byte extended frames a second) ferrocan receives every frame, with no
-overruns or errors.
-
-Against the Leaf it also passed single-shot (sent once when acknowledged, given
-up after one attempt when not) and a real fault: with the Leaf at the wrong
-bit rate, ferrocan went error passive on transmit and receive, bus-off,
-restarted by itself, and returned to error active once the Leaf was put right,
-with Linux following each step from its error frames.
-
-When the host asks for bus error reporting (`ip link … berr-reporting on`),
-each bus error reaches it as an error frame, as candleLight writes them: with
-nobody to acknowledge, every retry is reported, about 3400 a second at
-250 kbit/s, until a node acknowledges. On USB suspend the channel leaves the
-bus.
-
-The LEDs show what the adapter is doing: a brief heartbeat each second while
-stopped; dark on the bus, flashing for each frame received (RX) and sent (TX);
-blinking fast to identify. A firmware that panics on a board with no debug
-probe restarts in the ROM bootloader, so it can still be reflashed over USB.
-
-For Windows, Microsoft OS 2.0 descriptors ask for WinUSB on both interfaces,
-with candleLight's device interface GUID on the gs_usb one, so Windows should
-need no driver and candleLight tools should find it. The descriptors read
-correctly, but this hasn't been tried on Windows yet.
-
-Not yet: CAN FD on the G431.
+ST's NUCLEO-F072RB, 32F072BDISCOVERY (through its USB USER connector) and
+NUCLEO-G431KB (no USB or CAN pins: a start-up check under a probe) are
+supported for development.
 
 # Building
 
