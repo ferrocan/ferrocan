@@ -47,6 +47,10 @@ impl<const N: usize> Channel for Can<EmbassyClock, N> {
         Can::next_event(self).await
     }
 
+    fn abort(&mut self, id: TransmitId) -> Result<(), Fault> {
+        ConfirmedTransmit::<Frame>::abort(self, id).map_err(|_| Fault::Controller)
+    }
+
     /// FDCAN without retransmission marks a frame that lost arbitration and
     /// one that failed on an error the same way (RM0440, DAR mode).
     fn failure_cause(&self, _id: TransmitId) -> Option<FailureCause> {

@@ -24,12 +24,13 @@ use core::future::pending as never;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::Poll;
 
-use can_hal::{BusState, BusStatus, CanFdFrame, CanFrame, CanId, ErrorCounters, Event, Failure, Frame, Outcome, TransmitId};
+use can_hal::{Abort, BusState, BusStatus, CanFdFrame, CanFrame, CanId, ErrorCounters, Event, Failure, Frame, Outcome, TransmitId};
 use defmt::{debug, info, warn};
 use embassy_futures::poll_once;
-use embassy_futures::select::{Either3, Either4, select3, select4};
+use embassy_futures::select::{Either, Either3, Either4, select, select3, select4};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel as Queue;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::Handler;
@@ -94,6 +95,8 @@ pub struct Shared {
     /// The data phase's, for CAN FD.
     data_timing: Mutex<CriticalSectionRawMutex, RefCell<Option<Timing>>>,
     command: Signal<CriticalSectionRawMutex, Command>,
+    /// The `echo_id`s of frames the host asked to withdraw.
+    aborts: Queue<CriticalSectionRawMutex, u32, 4>,
     /// Whether the channel is on the bus, as the bridge last left it.
     running: AtomicBool,
     /// Whether the host asked the device to identify itself.
@@ -111,6 +114,7 @@ impl Shared {
             timing: Mutex::new(RefCell::new(None)),
             data_timing: Mutex::new(RefCell::new(None)),
             command: Signal::new(),
+            aborts: Queue::new(),
             running: AtomicBool::new(false),
             identify: AtomicBool::new(false),
             rx_activity: AtomicBool::new(false),
@@ -278,6 +282,16 @@ impl<C: Channel> Handler for Control<C> {
                     OutResponse::Accepted
                 }
                 _ => OutResponse::Rejected,
+            },
+            // Accepted whatever the session: the frame's echo tells.
+            Some(GsRequest::Abort) if req.value == 0 => match decode_u32(data) {
+                Ok(echo_id) => {
+                    if self.shared.aborts.try_send(echo_id).is_err() {
+                        warn!("gs_usb: too many aborts waiting, {} dropped", echo_id);
+                    }
+                    OutResponse::Accepted
+                }
+                Err(_) => OutResponse::Rejected,
             },
             Some(GsRequest::Identify) if req.value == 0 => match decode_u32(data) {
                 Ok(mode) => {
@@ -501,14 +515,16 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
         // No frame is taken from the host while a start or reset waits: it
         // may be one the host sent before, which the command discards. (The
         // bridge can be held up writing to a host that has gone, while a
-        // new one has already asked for a reset.)
-        let room = running && !shared.command.signaled() && pending.iter().any(Option::is_none);
+        // new one has already asked for a reset.) Nor while an abort waits:
+        // it is for a frame pending when it was asked, and the next may
+        // reuse that frame's `echo_id`.
+        let room = running && !shared.command.signaled() && shared.aborts.is_empty() && pending.iter().any(Option::is_none);
         let reading = room || out.is_partial();
         let packet = out.packet();
         let read = async { if reading { ep_out.read(packet).await } else { never::<Result<usize, EndpointError>>().await } };
         // Bus errors come only when the host asked for them (BERR_REPORTING).
         let events = select3(can.next_event(), can.next_bus_error(), can.next_warning_change());
-        match select4(read, events, shared.command.wait(), recovery.due()).await {
+        match select4(read, events, select(shared.command.wait(), shared.aborts.receive()), recovery.due()).await {
             Either4::First(Ok(len)) => {
                 if let Some(bytes) = out.received(len) {
                     from_host(can, ep_in, &mut in_buf, &mut pending, bytes, session.timestamps).await;
@@ -556,15 +572,10 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
                 errors.warning = now;
                 report_change(ep_in, &mut in_buf, &mut errors, running, counters, session.timestamps).await;
             }
-            Either4::Second(Either3::Second(error)) => {
-                if running {
-                    let counters = can.error_counters();
-                    let mut host = bus_error_frame(error, counters);
-                    host.timestamp_us = session.timestamps.then(|| micros(Instant::now()));
-                    write(ep_in, host.encode(&mut in_buf)).await;
-                }
-            }
-            Either4::Third(Command::Start { settings, session: asked }) => {
+            Either4::Second(Either3::Second(error)) if running => report_bus_error(ep_in, &mut in_buf, error, can.error_counters(), session.timestamps).await,
+            Either4::Second(Either3::Second(_)) => {}
+            Either4::Third(Either::Second(echo_id)) => abort(can, &pending, echo_id),
+            Either4::Third(Either::First(Command::Start { settings, session: asked })) => {
                 stop(can, ep_out, &mut pending, &mut out, &mut running, shared);
                 recovery = Recovery::Idle;
                 match can.start(&settings) {
@@ -579,7 +590,7 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
                     Err(e) => warn!("gs_usb: can't start the controller: {}", e),
                 }
             }
-            Either4::Third(Command::Reset) => {
+            Either4::Third(Either::First(Command::Reset)) => {
                 stop(can, ep_out, &mut pending, &mut out, &mut running, shared);
                 recovery = Recovery::Idle;
                 info!("gs_usb: reset");
@@ -718,7 +729,8 @@ async fn recover<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, in_buf: &
 fn failure_reason(outcome: &Outcome<Instant>, bus: BusState, cause: Option<FailureCause>) -> Option<u8> {
     match outcome {
         Outcome::Sent(_) => None,
-        Outcome::Aborted(_) => Some(tx_failed::ABORTED),
+        Outcome::Aborted(Abort::Confirmed) => Some(tx_failed::ABORTED),
+        Outcome::Aborted(_) => Some(tx_failed::ABORTED_UNCONFIRMED),
         Outcome::Failed(Failure::GaveUp) if bus == BusState::BusOff => Some(tx_failed::BUS_OFF),
         Outcome::Failed(Failure::GaveUp) => Some(match cause {
             Some(FailureCause::LostArbitration) => tx_failed::LOST_ARBITRATION,
@@ -776,6 +788,13 @@ async fn report_change(ep_in: &mut impl EndpointIn, in_buf: &mut [u8; FD_TS_LEN]
     } else {
         report_state(ep_in, in_buf, from, to, counters, timestamps).await;
     }
+}
+
+/// Tells the host of a bus error, with the counters after it.
+async fn report_bus_error(ep_in: &mut impl EndpointIn, in_buf: &mut [u8; FD_TS_LEN], error: BusError, counters: ErrorCounters, timestamps: bool) {
+    let mut host = bus_error_frame(error, counters);
+    host.timestamp_us = timestamps.then(|| micros(Instant::now()));
+    write(ep_in, host.encode(in_buf)).await;
 }
 
 /// Tells the host the level went from `from` to `to`.
@@ -872,6 +891,22 @@ fn stop<C: Channel>(can: &mut C, ep_out: &mut impl EndpointOut, pending: &mut [O
     shared.running.store(false, Ordering::Relaxed);
     *pending = [const { None }; 3];
     discard_out(ep_out, out);
+    // Aborts asked for before are for frames now forgotten, and their
+    // `echo_id`s may come again.
+    while shared.aborts.try_receive().is_ok() {}
+}
+
+/// Asks the channel to withdraw the host's frame `echo_id`, if it is pending
+/// (one already reported is ignored); its echo says whether it was.
+fn abort<C: Channel>(can: &mut C, pending: &[Option<Pending>; 3], echo_id: u32) {
+    if let Some(frame) = pending.iter().flatten().find(|p| p.frame.echo_id == echo_id) {
+        debug!("gs_usb: aborting frame {}", echo_id);
+        if let Err(e) = can.abort(frame.id) {
+            warn!("gs_usb: can't abort frame {}: {}", echo_id, e);
+        }
+    } else {
+        debug!("gs_usb: abort of frame {}, not pending", echo_id);
+    }
 }
 
 /// Sends `bytes` to the host as one transfer: full packets, then the rest,

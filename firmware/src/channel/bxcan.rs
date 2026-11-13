@@ -47,6 +47,10 @@ impl<const N: usize> Channel for Can<EmbassyClock, N> {
         }
     }
 
+    fn abort(&mut self, id: TransmitId) -> Result<(), Fault> {
+        ConfirmedTransmit::abort(self, id).map_err(|_| Fault::Controller)
+    }
+
     fn failure_cause(&self, id: TransmitId) -> Option<FailureCause> {
         match Can::failure_cause(self, id)? {
             can_hal_bxcan::FailureCause::LostArbitration => Some(FailureCause::LostArbitration),

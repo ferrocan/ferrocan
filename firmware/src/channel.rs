@@ -147,6 +147,14 @@ pub trait Channel {
     /// The next bus error, when they are reported; otherwise never.
     fn next_bus_error(&self) -> impl Future<Output = BusError>;
 
+    /// Asks for transmission `id` to be withdrawn if its transmission hasn't
+    /// started; its report says whether it was.
+    ///
+    /// # Errors
+    ///
+    /// [`Fault::Controller`] if the controller refuses.
+    fn abort(&mut self, id: TransmitId) -> Result<(), Fault>;
+
     /// Why the controller gave up on transmission `id`, reported failed, if
     /// it says (bxCAN does; FDCAN, without retransmission, doesn't tell lost
     /// arbitration from an error). Asked once, as the report is read.
