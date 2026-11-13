@@ -1,0 +1,13 @@
+version = 1
+
+# Files that can't carry a header, or that Cargo writes.
+[[annotations]]
+path = [
+    "**/Cargo.toml",
+    "Cargo.lock",
+    ".cargo/config.toml",
+    ".gitignore",
+    "**/*.md",
+]
+SPDX-FileCopyrightText = "2026-2026. Aeolionics, LLC"
+SPDX-License-Identifier = "MIT OR Apache-2.0"

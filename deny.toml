@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: 2026-2026. Aeolionics, LLC
+#
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+# cargo-deny policy: permissive licences only, RustSec advisories, and
+# dependencies from crates.io or our own GitHub organisation.
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # bare-metal is unmaintained (not a vulnerability); it comes in through
+    # cortex-m 0.7, which every Cortex-M HAL still depends on.
+    { id = "RUSTSEC-2026-0110", reason = "unmaintained, via cortex-m 0.7; no fix upstream yet" },
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "Unlicense",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[sources.allow-org]
+github = ["aeolionics-rs"]
