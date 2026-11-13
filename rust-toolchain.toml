@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026-2026. Aeolionics, LLC
+#
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+# One exact toolchain, so that CI and local builds make the same images.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["rustfmt", "clippy", "llvm-tools"]
+targets = ["thumbv6m-none-eabi", "thumbv7em-none-eabihf"]

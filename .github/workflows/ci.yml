@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: 2026-2026. Aeolionics, LLC
+#
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+# The check on every pull request and on main. It builds against the
+# libraries as pushed (no local patch), so a change that needs an unmerged
+# library change fails here.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # While a dependency is private, a read-only token for aeolionics-rs.
+  DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
+
+jobs:
+  board:
+    name: ${{ matrix.board }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [sh-c30a, sh-c31a, nucleo-f072rb, disco-f072b, nucleo-g431kb]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Access to private dependencies
+        if: ${{ env.DEPS_TOKEN != '' }}
+        run: git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/aeolionics-rs/".insteadOf "https://github.com/aeolionics-rs/"
+      - run: rustup toolchain install
+      - run: cargo clippy-${{ matrix.board }} -- -D warnings
+      - run: cargo build-${{ matrix.board }}
+
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Access to private dependencies
+        if: ${{ env.DEPS_TOKEN != '' }}
+        run: git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/aeolionics-rs/".insteadOf "https://github.com/aeolionics-rs/"
+      - run: rustup toolchain install
+      - run: cargo fmt --all --check
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+      - uses: fsfe/reuse-action@v5
