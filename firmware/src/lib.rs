@@ -13,3 +13,4 @@ pub mod board;
 pub mod channel;
 pub mod dfu;
 pub mod gs_usb;
+pub mod version;
