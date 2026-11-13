@@ -120,22 +120,35 @@ Each board has cargo aliases, run from the repository's root:
 cargo build-nucleo-f072rb
 cargo run-nucleo-f072rb      # flash with probe-rs through the Nucleo's ST-LINK, then show the log
 cargo clippy-nucleo-f072rb
-cargo build-sh-c30a           # release image; flash it over USB as below
+cargo build-sh-c30a           # an optimised image; flash it over USB as below
 ```
 
 # Flashing over USB
 
-On a board without a debug probe, such as an adapter, flash over USB with
-`dfu-util` and `arm-none-eabi-objcopy`:
+Each [release](https://github.com/ferrocan/ferrocan/releases) has an image
+per adapter family: `sh-c30` for the SH-C30A and SH-C30G (STM32F072,
+classic CAN), `sh-c31` for the SH-C31A (STM32G431, CAN FD). Flash its
+`.bin` with [`dfu-util`](https://dfu-util.sourceforge.net/):
 
 ```sh
-arm-none-eabi-objcopy -O binary target/thumbv6m-none-eabi/release/ferrocan ferrocan.bin
-dfu-util -d 1d50:606f -e                                     # restart in the ROM bootloader
-dfu-util -d 0483:df11 -a 0 -s 0x08000000:leave -D ferrocan.bin  # flash, then run it
+scripts/flash.sh ferrocan-0.1.0-sh-c30.bin             # the only adapter plugged in
+scripts/flash.sh ferrocan-0.1.0-sh-c30.bin 0012ABCD…   # one of several, by serial number
 ```
 
-A board still running other firmware can be put in the bootloader with its
-boot switch instead.
+The script restarts an adapter running ferrocan or candleLight in ST's ROM
+bootloader, writes the image, reads it back to compare, and starts it. A
+board running other firmware has to be put in the bootloader with its boot
+switch first. By hand, the steps are:
+
+```sh
+dfu-util -d 1d50:606f -e                                   # restart in the ROM bootloader
+dfu-util -d 0483:df11 -a 0 -s 0x08000000 -D ferrocan.bin   # write the image
+dfu-util -d 0483:df11 -a 0 -s 0x08000000:4:leave -U x.bin  # start it
+```
+
+To build the release images yourself, run `scripts/release.sh` (see
+[docs/releasing.md](docs/releasing.md)): with the pinned toolchain it makes
+the same bytes as the release.
 
 # USB identity
 
