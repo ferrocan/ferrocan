@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: 2026-2026. Aeolionics, LLC
+#
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+# On a version tag: build the release images with scripts/release.sh and
+# draft a GitHub release with them, to publish after the bench checklist
+# (docs/releasing.md).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx@0.5.10,cargo-about@0.9.3
+      - name: The tag names the package's version
+        run: |
+          version=$(cargo pkgid --locked -p ferrocan | sed 's/.*[@#]//')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, but the package is $version"
+            exit 1
+          fi
+      - run: scripts/release.sh dist
+      # Signed provenance for the images (public repositories only).
+      - uses: actions/attest-build-provenance@v2
+        if: ${{ !github.event.repository.private }}
+        with:
+          subject-path: "dist/*.elf, dist/*.bin"
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --generate-notes --title "ferrocan ${GITHUB_REF_NAME#v}"
