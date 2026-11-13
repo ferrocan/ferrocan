@@ -14,14 +14,17 @@
 //! to the host when the channel reports it, so an echo means the frame was
 //! acknowledged on the bus, not merely queued. A frame aborted or given up is
 //! echoed too, as Linux's `gs_usb` frees a transmit slot only on an echo; it
-//! has no way to be told a frame failed.
+//! has no way to be told a frame failed. A host that asks for transmit
+//! confirmation ([`feature::TX_CONFIRMATION`], ours: `can_usb_gs`) is told,
+//! by [`frame_flag::TX_FAILED`] on the echo and the reason in its first
+//! data byte.
 
 use core::cell::RefCell;
 use core::future::pending as never;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::Poll;
 
-use can_hal::{BusState, BusStatus, CanFdFrame, CanFrame, CanId, ErrorCounters, Event, Frame, Outcome, TransmitId};
+use can_hal::{BusState, BusStatus, CanFdFrame, CanFrame, CanId, ErrorCounters, Event, Failure, Frame, Outcome, TransmitId};
 use defmt::{debug, info, warn};
 use embassy_futures::poll_once;
 use embassy_futures::select::{Either3, Either4, select3, select4};
@@ -32,7 +35,7 @@ use embassy_time::{Duration, Instant, Timer};
 use embassy_usb::Handler;
 use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestType};
 use embassy_usb::driver::{EndpointError, EndpointIn, EndpointOut};
-use gs_usb_protocol::{BtConst, BtConstExt, DeviceBittiming, DeviceConfig, DeviceMode, DeviceState, ECHO_ID_RX, FD_TS_LEN, HostFrame, Request as GsRequest, can_err, can_id, decode_u32, fd_len, feature, frame_flag, identify, mode, state};
+use gs_usb_protocol::{BtConst, BtConstExt, DeviceBittiming, DeviceConfig, DeviceMode, DeviceState, ECHO_ID_RX, FD_TS_LEN, HostFrame, Request as GsRequest, can_err, can_id, decode_u32, fd_len, feature, frame_flag, identify, mode, state, tx_failed};
 
 use crate::channel::{BusError, Channel, Fault, Mode, Settings, Timing};
 
@@ -46,7 +49,7 @@ const fn features<C: Channel>() -> u32 {
 /// that are modes, CAN FD among them if the controller does it.
 const fn mode_flags<C: Channel>() -> u32 {
     let fd = if C::DATA.is_some() { feature::FD } else { 0 };
-    feature::LISTEN_ONLY | feature::LOOP_BACK | feature::ONE_SHOT | feature::HW_TIMESTAMP | feature::BERR_REPORTING | fd
+    feature::LISTEN_ONLY | feature::LOOP_BACK | feature::ONE_SHOT | feature::HW_TIMESTAMP | feature::BERR_REPORTING | feature::TX_CONFIRMATION | fd
 }
 
 /// Bulk packets: a classic frame, with its timestamp, is 24 bytes; an FD
@@ -70,10 +73,19 @@ const HW_VERSION: u32 = 1;
 
 /// What the host asked the channel to do.
 pub enum Command {
-    /// Join the bus with these settings, stamping frames or not.
-    Start { settings: Settings, timestamps: bool },
+    /// Join the bus with these settings, for a session as the host asked.
+    Start { settings: Settings, session: Session },
     /// Leave the bus.
     Reset,
+}
+
+/// What the host asked of a session besides the channel's settings.
+#[derive(Clone, Copy, Default)]
+pub struct Session {
+    /// Stamp the frames to the host.
+    pub timestamps: bool,
+    /// Say on the echo when a frame wasn't sent, and why.
+    pub tx_confirmation: bool,
 }
 
 /// What the control handler and the bridge share.
@@ -207,10 +219,11 @@ impl<C: Channel> Control<C> {
             retransmit: flags & feature::ONE_SHOT == 0,
             bus_errors: flags & feature::BERR_REPORTING != 0,
         };
-        self.shared.command.signal(Command::Start {
-            settings,
+        let session = Session {
             timestamps: flags & feature::HW_TIMESTAMP != 0,
-        });
+            tx_confirmation: flags & feature::TX_CONFIRMATION != 0,
+        };
+        self.shared.command.signal(Command::Start { settings, session });
         OutResponse::Accepted
     }
 }
@@ -476,7 +489,7 @@ struct Pending {
 pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out: &mut impl EndpointOut, shared: &Shared) -> ! {
     let mut pending: [Option<Pending>; 3] = [const { None }; 3];
     let mut running = false;
-    let mut timestamps = false;
+    let mut session = Session::default();
     // The error state, and the frames lost so far.
     let mut errors = ErrorState::CLEAR;
     let mut lost = 0;
@@ -498,7 +511,7 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
         match select4(read, events, shared.command.wait(), recovery.due()).await {
             Either4::First(Ok(len)) => {
                 if let Some(bytes) = out.received(len) {
-                    from_host(can, ep_in, &mut in_buf, &mut pending, bytes, timestamps).await;
+                    from_host(can, ep_in, &mut in_buf, &mut pending, bytes, session.timestamps).await;
                 }
             }
             Either4::First(Err(EndpointError::Disabled)) => {
@@ -511,18 +524,25 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
             Either4::Second(Either3::First(event)) => match event {
                 Event::Received(received) if running => {
                     let mut host = from_frame(received.frame(), ECHO_ID_RX);
-                    host.timestamp_us = timestamps.then(|| micros(*received.timestamp()));
+                    host.timestamp_us = session.timestamps.then(|| micros(*received.timestamp()));
                     host.flags |= overflow(can.lost_frames(), &mut lost);
                     shared.rx_activity.store(true, Ordering::Relaxed);
                     write(ep_in, host.encode(&mut in_buf)).await;
                 }
                 Event::Received(_) => {}
-                Event::Transmitted { id, outcome } => echo(ep_in, &mut in_buf, &mut pending, id, outcome, timestamps, shared).await,
+                Event::Transmitted { id, outcome } => {
+                    if matches!(outcome, Outcome::Sent(_)) {
+                        shared.tx_activity.store(true, Ordering::Relaxed);
+                    }
+                    let failed = if session.tx_confirmation { failure_reason(&outcome, errors.bus) } else { None };
+                    echo(ep_in, &mut in_buf, &mut pending, id, outcome, failed, session.timestamps).await;
+                }
                 Event::BusStateChanged(state) => {
                     let counters = can.error_counters();
                     info!("gs_usb: bus {}, counters {}/{}", defmt::Debug2Format(&state), counters.transmit, counters.receive);
                     errors.bus = state;
-                    report_change(ep_in, &mut in_buf, &mut errors, running, counters, timestamps).await;
+                    errors.warning = latest_warning(can, errors.warning);
+                    report_change(ep_in, &mut in_buf, &mut errors, running, counters, session.timestamps).await;
                     recovery = match state {
                         BusState::BusOff if running => Recovery::Due(Instant::now() + BUS_OFF_RESTART_DELAY),
                         BusState::BusOff => recovery,
@@ -534,27 +554,27 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
                 let counters = can.error_counters();
                 info!("gs_usb: warning level {}, counters {}/{}", now, counters.transmit, counters.receive);
                 errors.warning = now;
-                report_change(ep_in, &mut in_buf, &mut errors, running, counters, timestamps).await;
+                report_change(ep_in, &mut in_buf, &mut errors, running, counters, session.timestamps).await;
             }
             Either4::Second(Either3::Second(error)) => {
                 if running {
                     let counters = can.error_counters();
                     let mut host = bus_error_frame(error, counters);
-                    host.timestamp_us = timestamps.then(|| micros(Instant::now()));
+                    host.timestamp_us = session.timestamps.then(|| micros(Instant::now()));
                     write(ep_in, host.encode(&mut in_buf)).await;
                 }
             }
-            Either4::Third(Command::Start { settings, timestamps: stamped }) => {
+            Either4::Third(Command::Start { settings, session: asked }) => {
                 stop(can, ep_out, &mut pending, &mut out, &mut running, shared);
                 recovery = Recovery::Idle;
                 match can.start(&settings) {
                     Ok(()) => {
                         running = true;
                         shared.running.store(true, Ordering::Relaxed);
-                        timestamps = stamped;
+                        session = asked;
                         errors = ErrorState::CLEAR;
                         lost = can.lost_frames();
-                        info!("gs_usb: started, {}, timestamps {}", settings.mode, timestamps);
+                        info!("gs_usb: started, {}, timestamps {}, TX confirmation {}", settings.mode, session.timestamps, session.tx_confirmation);
                     }
                     Err(e) => warn!("gs_usb: can't start the controller: {}", e),
                 }
@@ -565,7 +585,7 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
                 info!("gs_usb: reset");
             }
             Either4::Fourth(()) => {
-                recovery = recover(can, ep_in, &mut in_buf, recovery, timestamps).await;
+                recovery = recover(can, ep_in, &mut in_buf, recovery, session.timestamps).await;
                 if matches!(recovery, Recovery::Idle) {
                     errors = ErrorState::CLEAR;
                 }
@@ -691,30 +711,64 @@ async fn recover<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, in_buf: &
     }
 }
 
+/// Why a frame wasn't sent, as its echo says it with transmit confirmation
+/// on ([`tx_failed`]), the channel being in `bus`; `None` if it was sent.
+/// Frames the channel gives up while bus-off were dropped on going bus-off.
+fn failure_reason(outcome: &Outcome<Instant>, bus: BusState) -> Option<u8> {
+    match outcome {
+        Outcome::Sent(_) => None,
+        Outcome::Aborted(_) => Some(tx_failed::ABORTED),
+        Outcome::Failed(Failure::GaveUp) if bus == BusState::BusOff => Some(tx_failed::BUS_OFF),
+        Outcome::Failed(Failure::GaveUp) => Some(tx_failed::GAVE_UP),
+        // Unconfirmed, or a failure can-hal adds later: it may have been sent.
+        Outcome::Failed(_) => Some(tx_failed::UNCONFIRMED),
+    }
+}
+
 /// Echoes the host's frame `id` now that the channel has reported it: sent,
-/// or not (the echo frees the host's slot either way).
-async fn echo(ep_in: &mut impl EndpointIn, in_buf: &mut [u8; FD_TS_LEN], pending: &mut [Option<Pending>; 3], id: TransmitId, outcome: Outcome<Instant>, timestamps: bool, shared: &Shared) {
+/// or not (the echo frees the host's slot either way). With `failed`, the
+/// echo says it wasn't sent and why.
+async fn echo(ep_in: &mut impl EndpointIn, in_buf: &mut [u8; FD_TS_LEN], pending: &mut [Option<Pending>; 3], id: TransmitId, outcome: Outcome<Instant>, failed: Option<u8>, timestamps: bool) {
     let Some(slot) = pending.iter_mut().find(|p| p.as_ref().is_some_and(|p| p.id == id)) else { return };
     let Some(Pending { frame: mut echo, .. }) = slot.take() else { return };
     let at = match outcome {
-        Outcome::Sent(at) => {
-            shared.tx_activity.store(true, Ordering::Relaxed);
-            at
-        }
+        Outcome::Sent(at) => at,
         other => {
             debug!("gs_usb: frame {} not sent: {}", echo.echo_id, defmt::Debug2Format(&other));
             Instant::now()
         }
     };
+    if let Some(reason) = failed {
+        echo.flags |= frame_flag::TX_FAILED;
+        echo.data[0] = reason;
+    }
     echo.timestamp_us = timestamps.then(|| micros(at));
     write(ep_in, echo.encode(in_buf)).await;
 }
 
-/// Tells the host, while `running`, of a change in `errors`' level.
+/// The channel's warning level as it now is, if it changed since last
+/// taken, else `warning`: a change of bus state may come before the change
+/// of warning level that goes with it (recovering from bus-off clears the
+/// counters, say).
+fn latest_warning<C: Channel>(can: &C, warning: bool) -> bool {
+    match poll_once(can.next_warning_change()) {
+        Poll::Ready(now) => now,
+        Poll::Pending => warning,
+    }
+}
+
+/// Tells the host, while `running`, of a change in `errors`' level. Leaving
+/// bus-off is told as a restart, as candleLight does, then any change from
+/// error active (the bus may already have raised the counters again).
 async fn report_change(ep_in: &mut impl EndpointIn, in_buf: &mut [u8; FD_TS_LEN], errors: &mut ErrorState, running: bool, counters: ErrorCounters, timestamps: bool) {
-    if let Some((from, to)) = errors.change()
-        && running
-    {
+    let Some((from, to)) = errors.change() else { return };
+    if !running {
+        return;
+    }
+    if from == Level::BusOff && to != Level::Active {
+        report_state(ep_in, in_buf, from, Level::Active, counters, timestamps).await;
+        report_state(ep_in, in_buf, Level::Active, to, counters, timestamps).await;
+    } else {
         report_state(ep_in, in_buf, from, to, counters, timestamps).await;
     }
 }
