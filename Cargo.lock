@@ -106,6 +106,7 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 [[package]]
 name = "can-hal-bxcan"
 version = "0.1.0"
+source = "git+https://github.com/aeolionics-rs/can-hal-embedded?branch=main#62ae46825036be57f70dee78b4fe71ec58661d2e"
 dependencies = [
  "can-hal-rs",
  "critical-section",
@@ -115,6 +116,7 @@ dependencies = [
 [[package]]
 name = "can-hal-fdcan"
 version = "0.1.0"
+source = "git+https://github.com/aeolionics-rs/can-hal-embedded?branch=main#62ae46825036be57f70dee78b4fe71ec58661d2e"
 dependencies = [
  "can-hal-rs",
  "critical-section",
@@ -124,6 +126,7 @@ dependencies = [
 [[package]]
 name = "can-hal-rs"
 version = "0.4.3"
+source = "git+https://github.com/aeolionics-rs/can-hal-rs?branch=aeolionics#102307cd89f186a71b4f4d48f7d7c004355f8702"
 
 [[package]]
 name = "cc"
@@ -721,6 +724,7 @@ dependencies = [
 [[package]]
 name = "gs_usb_protocol"
 version = "0.1.0"
+source = "git+https://github.com/aeolionics-rs/can_usb_rs?branch=main#66761fa0cb10068c25e81f50dc246bb0d57900a4"
 
 [[package]]
 name = "hash32"
