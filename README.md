@@ -110,6 +110,14 @@ dfu-util -d 0483:df11 -a 0 -s 0x08000000:leave -D ferrocan.bin  # flash, then ru
 A board still running other firmware can be put in the bootloader with its
 boot switch instead.
 
+# USB identity
+
+ferrocan presents USB ID `1d50:606f`, the ID OpenMoko allocated to
+candleLight, so that Linux's `gs_usb` driver, which matches on it, binds
+the adapter with no configuration. Other gs_usb-compatible firmware does the
+same. The manufacturer and product strings name ferrocan and the board, so a
+host can tell it from candleLight.
+
 # License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
