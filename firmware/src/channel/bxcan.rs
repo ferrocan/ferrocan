@@ -8,7 +8,7 @@ use can_hal::{BusState, BusStatus, ConfirmedTransmit, ErrorCounters, Event, Fram
 use can_hal_bxcan::{BitTiming, Can, Config};
 use embassy_time::Instant;
 
-use super::{BusError, Channel, Fault, Limits, Mode, Settings};
+use super::{BusError, Channel, FailureCause, Fault, Limits, Mode, Settings};
 use crate::board::{CAN_CLOCK_HZ, EmbassyClock};
 
 impl<const N: usize> Channel for Can<EmbassyClock, N> {
@@ -44,6 +44,14 @@ impl<const N: usize> Channel for Can<EmbassyClock, N> {
             }
             Event::Transmitted { id, outcome } => Event::Transmitted { id, outcome },
             Event::BusStateChanged(state) => Event::BusStateChanged(state),
+        }
+    }
+
+    fn failure_cause(&self, id: TransmitId) -> Option<FailureCause> {
+        match Can::failure_cause(self, id)? {
+            can_hal_bxcan::FailureCause::LostArbitration => Some(FailureCause::LostArbitration),
+            can_hal_bxcan::FailureCause::Error => Some(FailureCause::Error),
+            _ => None,
         }
     }
 

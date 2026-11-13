@@ -37,7 +37,7 @@ use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestT
 use embassy_usb::driver::{EndpointError, EndpointIn, EndpointOut};
 use gs_usb_protocol::{BtConst, BtConstExt, DeviceBittiming, DeviceConfig, DeviceMode, DeviceState, ECHO_ID_RX, FD_TS_LEN, HostFrame, Request as GsRequest, can_err, can_id, decode_u32, fd_len, feature, frame_flag, identify, mode, state, tx_failed};
 
-use crate::channel::{BusError, Channel, Fault, Mode, Settings, Timing};
+use crate::channel::{BusError, Channel, FailureCause, Fault, Mode, Settings, Timing};
 
 /// The features the device offers with a channel of type `C`.
 const fn features<C: Channel>() -> u32 {
@@ -534,7 +534,7 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
                     if matches!(outcome, Outcome::Sent(_)) {
                         shared.tx_activity.store(true, Ordering::Relaxed);
                     }
-                    let failed = if session.tx_confirmation { failure_reason(&outcome, errors.bus) } else { None };
+                    let failed = if session.tx_confirmation { failure_reason(&outcome, errors.bus, can.failure_cause(id)) } else { None };
                     echo(ep_in, &mut in_buf, &mut pending, id, outcome, failed, session.timestamps).await;
                 }
                 Event::BusStateChanged(state) => {
@@ -712,14 +712,19 @@ async fn recover<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, in_buf: &
 }
 
 /// Why a frame wasn't sent, as its echo says it with transmit confirmation
-/// on ([`tx_failed`]), the channel being in `bus`; `None` if it was sent.
-/// Frames the channel gives up while bus-off were dropped on going bus-off.
-fn failure_reason(outcome: &Outcome<Instant>, bus: BusState) -> Option<u8> {
+/// on ([`tx_failed`]), the channel being in `bus` and the controller giving
+/// `cause`; `None` if it was sent. Frames the channel gives up while bus-off
+/// were dropped on going bus-off.
+fn failure_reason(outcome: &Outcome<Instant>, bus: BusState, cause: Option<FailureCause>) -> Option<u8> {
     match outcome {
         Outcome::Sent(_) => None,
         Outcome::Aborted(_) => Some(tx_failed::ABORTED),
         Outcome::Failed(Failure::GaveUp) if bus == BusState::BusOff => Some(tx_failed::BUS_OFF),
-        Outcome::Failed(Failure::GaveUp) => Some(tx_failed::GAVE_UP),
+        Outcome::Failed(Failure::GaveUp) => Some(match cause {
+            Some(FailureCause::LostArbitration) => tx_failed::LOST_ARBITRATION,
+            Some(FailureCause::Error) => tx_failed::TX_ERROR,
+            None => tx_failed::GAVE_UP,
+        }),
         // Unconfirmed, or a failure can-hal adds later: it may have been sent.
         Outcome::Failed(_) => Some(tx_failed::UNCONFIRMED),
     }

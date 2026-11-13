@@ -96,6 +96,15 @@ pub enum BusError {
     Other,
 }
 
+/// Why the controller gave up on a frame, when it says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+pub enum FailureCause {
+    /// Its last attempt lost arbitration.
+    LostArbitration,
+    /// Its last attempt failed on an error.
+    Error,
+}
+
 /// What went wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
 pub enum Fault {
@@ -137,6 +146,11 @@ pub trait Channel {
 
     /// The next bus error, when they are reported; otherwise never.
     fn next_bus_error(&self) -> impl Future<Output = BusError>;
+
+    /// Why the controller gave up on transmission `id`, reported failed, if
+    /// it says (bxCAN does; FDCAN, without retransmission, doesn't tell lost
+    /// arbitration from an error). Asked once, as the report is read.
+    fn failure_cause(&self, id: TransmitId) -> Option<FailureCause>;
 
     /// Whether an error counter is at the warning level (96), once that has
     /// changed, waiting for a change. It follows the counters, so it stays

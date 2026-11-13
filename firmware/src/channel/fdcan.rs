@@ -9,7 +9,7 @@ use can_hal::{BusState, BusStatus, ConfirmedTransmit, ErrorCounters, Event, Fram
 use can_hal_fdcan::{BitTiming, Can, Config, Error};
 use embassy_time::Instant;
 
-use super::{BusError, Channel, Fault, Limits, Mode, Settings, Timing};
+use super::{BusError, Channel, FailureCause, Fault, Limits, Mode, Settings, Timing};
 use crate::board::{CAN_CLOCK_HZ, EmbassyClock};
 
 impl<const N: usize> Channel for Can<EmbassyClock, N> {
@@ -45,6 +45,12 @@ impl<const N: usize> Channel for Can<EmbassyClock, N> {
 
     async fn next_event(&self) -> Event<Frame, Instant> {
         Can::next_event(self).await
+    }
+
+    /// FDCAN without retransmission marks a frame that lost arbitration and
+    /// one that failed on an error the same way (RM0440, DAR mode).
+    fn failure_cause(&self, _id: TransmitId) -> Option<FailureCause> {
+        None
     }
 
     async fn next_warning_change(&self) -> bool {
