@@ -47,6 +47,10 @@ impl<const N: usize> Channel for Can<EmbassyClock, N> {
         }
     }
 
+    async fn next_warning_change(&self) -> bool {
+        Can::next_warning_change(self).await
+    }
+
     async fn next_bus_error(&self) -> BusError {
         match Can::next_bus_error(self).await {
             can_hal_bxcan::BusError::Stuff => BusError::Stuff,

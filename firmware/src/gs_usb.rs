@@ -24,7 +24,7 @@ use core::task::Poll;
 use can_hal::{BusState, BusStatus, CanFdFrame, CanFrame, CanId, ErrorCounters, Event, Frame, Outcome, TransmitId};
 use defmt::{debug, info, warn};
 use embassy_futures::poll_once;
-use embassy_futures::select::{Either, Either4, select, select4};
+use embassy_futures::select::{Either3, Either4, select3, select4};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
@@ -358,6 +358,87 @@ const BUS_OFF_RESTART_DELAY: Duration = Duration::from_millis(100);
 /// on an idle bus at 500 kbit/s.
 const RECOVERY_POLL: Duration = Duration::from_millis(10);
 
+/// The error state as Linux's `gs_usb` tracks it: can-hal's [`BusState`]
+/// with the warning level between active and passive.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, defmt::Format)]
+enum Level {
+    Active,
+    Warning,
+    Passive,
+    BusOff,
+}
+
+impl Level {
+    /// The level of a channel in `state`, with an error counter at the
+    /// warning level or not.
+    const fn of(state: BusState, warning: bool) -> Self {
+        match state {
+            BusState::BusOff => Self::BusOff,
+            BusState::ErrorPassive => Self::Passive,
+            BusState::ErrorActive if warning => Self::Warning,
+            BusState::ErrorActive => Self::Active,
+        }
+    }
+
+    /// The level one error counter puts the channel at (bus-off is not
+    /// the counters' to say).
+    const fn of_counter(count: u8) -> Self {
+        if count >= 128 {
+            Self::Passive
+        } else if count >= WARNING_LEVEL {
+            Self::Warning
+        } else {
+            Self::Active
+        }
+    }
+
+    /// The `data[1]` flag for the transmit counter at this level.
+    const fn tx_flag(self) -> u8 {
+        match self {
+            Self::Active => can_err::crtl::ACTIVE,
+            Self::Warning => can_err::crtl::TX_WARNING,
+            Self::Passive => can_err::crtl::TX_PASSIVE,
+            Self::BusOff => 0,
+        }
+    }
+
+    /// The `data[1]` flag for the receive counter at this level.
+    const fn rx_flag(self) -> u8 {
+        match self {
+            Self::Active => can_err::crtl::ACTIVE,
+            Self::Warning => can_err::crtl::RX_WARNING,
+            Self::Passive => can_err::crtl::RX_PASSIVE,
+            Self::BusOff => 0,
+        }
+    }
+}
+
+/// The error state as the channel last reported it, and the level last
+/// reported to the host.
+struct ErrorState {
+    bus: BusState,
+    warning: bool,
+    reported: Level,
+}
+
+impl ErrorState {
+    /// As from power-on, and after recovery from bus-off, which clears the
+    /// error counters.
+    const CLEAR: Self = Self {
+        bus: BusState::ErrorActive,
+        warning: false,
+        reported: Level::Active,
+    };
+
+    /// The change of level to tell the host about, if there is one, taken as
+    /// reported.
+    fn change(&mut self) -> Option<(Level, Level)> {
+        let now = Level::of(self.bus, self.warning);
+        let from = core::mem::replace(&mut self.reported, now);
+        (now != from).then_some((from, now))
+    }
+}
+
 /// Where an automatic recovery from bus-off stands.
 #[derive(Clone, Copy)]
 enum Recovery {
@@ -367,6 +448,16 @@ enum Recovery {
     Due(Instant),
     /// Recovering: look again at this time.
     Waiting(Instant),
+}
+
+impl Recovery {
+    /// Waits until the recovery has something to do; for ever when idle.
+    async fn due(self) {
+        match self {
+            Self::Idle => never().await,
+            Self::Due(at) | Self::Waiting(at) => Timer::at(at).await,
+        }
+    }
 }
 
 /// A frame the host sent, awaiting its report.
@@ -386,8 +477,8 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
     let mut pending: [Option<Pending>; 3] = [const { None }; 3];
     let mut running = false;
     let mut timestamps = false;
-    // The bus state last reported to the host, and the frames lost so far.
-    let mut bus = BusState::ErrorActive;
+    // The error state, and the frames lost so far.
+    let mut errors = ErrorState::CLEAR;
     let mut lost = 0;
     let mut recovery = Recovery::Idle;
     let mut out = OutTransfer::new();
@@ -402,19 +493,9 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
         let reading = room || out.is_partial();
         let packet = out.packet();
         let read = async { if reading { ep_out.read(packet).await } else { never::<Result<usize, EndpointError>>().await } };
-        let wake = match recovery {
-            Recovery::Idle => None,
-            Recovery::Due(at) | Recovery::Waiting(at) => Some(at),
-        };
-        let timer = async move {
-            match wake {
-                Some(at) => Timer::at(at).await,
-                None => never::<()>().await,
-            }
-        };
         // Bus errors come only when the host asked for them (BERR_REPORTING).
-        let events = select(can.next_event(), can.next_bus_error());
-        match select4(read, events, shared.command.wait(), timer).await {
+        let events = select3(can.next_event(), can.next_bus_error(), can.next_warning_change());
+        match select4(read, events, shared.command.wait(), recovery.due()).await {
             Either4::First(Ok(len)) => {
                 if let Some(bytes) = out.received(len) {
                     from_host(can, ep_in, &mut in_buf, &mut pending, bytes, timestamps).await;
@@ -427,7 +508,7 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
                 ep_out.wait_enabled().await;
             }
             Either4::First(Err(EndpointError::BufferOverflow)) => warn!("gs_usb: OUT transfer too long"),
-            Either4::Second(Either::First(event)) => match event {
+            Either4::Second(Either3::First(event)) => match event {
                 Event::Received(received) if running => {
                     let mut host = from_frame(received.frame(), ECHO_ID_RX);
                     host.timestamp_us = timestamps.then(|| micros(*received.timestamp()));
@@ -440,10 +521,8 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
                 Event::BusStateChanged(state) => {
                     let counters = can.error_counters();
                     info!("gs_usb: bus {}, counters {}/{}", defmt::Debug2Format(&state), counters.transmit, counters.receive);
-                    if running && state != bus {
-                        report_state(ep_in, &mut in_buf, bus, state, counters, timestamps).await;
-                    }
-                    bus = state;
+                    errors.bus = state;
+                    report_change(ep_in, &mut in_buf, &mut errors, running, counters, timestamps).await;
                     recovery = match state {
                         BusState::BusOff if running => Recovery::Due(Instant::now() + BUS_OFF_RESTART_DELAY),
                         BusState::BusOff => recovery,
@@ -451,7 +530,13 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
                     };
                 }
             },
-            Either4::Second(Either::Second(error)) => {
+            Either4::Second(Either3::Third(now)) => {
+                let counters = can.error_counters();
+                info!("gs_usb: warning level {}, counters {}/{}", now, counters.transmit, counters.receive);
+                errors.warning = now;
+                report_change(ep_in, &mut in_buf, &mut errors, running, counters, timestamps).await;
+            }
+            Either4::Second(Either3::Second(error)) => {
                 if running {
                     let counters = can.error_counters();
                     let mut host = bus_error_frame(error, counters);
@@ -467,7 +552,7 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
                         running = true;
                         shared.running.store(true, Ordering::Relaxed);
                         timestamps = stamped;
-                        bus = BusState::ErrorActive;
+                        errors = ErrorState::CLEAR;
                         lost = can.lost_frames();
                         info!("gs_usb: started, {}, timestamps {}", settings.mode, timestamps);
                     }
@@ -482,7 +567,7 @@ pub async fn bridge<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, ep_out
             Either4::Fourth(()) => {
                 recovery = recover(can, ep_in, &mut in_buf, recovery, timestamps).await;
                 if matches!(recovery, Recovery::Idle) {
-                    bus = BusState::ErrorActive;
+                    errors = ErrorState::CLEAR;
                 }
             }
         }
@@ -598,7 +683,7 @@ async fn recover<C: Channel>(can: &mut C, ep_in: &mut impl EndpointIn, in_buf: &
         Recovery::Waiting(_) if can.bus_state() != BusState::BusOff => {
             let counters = can.error_counters();
             info!("gs_usb: recovered, counters {}/{}", counters.transmit, counters.receive);
-            report_state(ep_in, in_buf, BusState::BusOff, BusState::ErrorActive, counters, timestamps).await;
+            report_state(ep_in, in_buf, Level::BusOff, Level::Active, counters, timestamps).await;
             Recovery::Idle
         }
         Recovery::Waiting(_) => Recovery::Waiting(Instant::now() + RECOVERY_POLL),
@@ -625,8 +710,17 @@ async fn echo(ep_in: &mut impl EndpointIn, in_buf: &mut [u8; FD_TS_LEN], pending
     write(ep_in, echo.encode(in_buf)).await;
 }
 
-/// Tells the host the bus state went from `from` to `to`.
-async fn report_state(ep_in: &mut impl EndpointIn, in_buf: &mut [u8; FD_TS_LEN], from: BusState, to: BusState, counters: ErrorCounters, timestamps: bool) {
+/// Tells the host, while `running`, of a change in `errors`' level.
+async fn report_change(ep_in: &mut impl EndpointIn, in_buf: &mut [u8; FD_TS_LEN], errors: &mut ErrorState, running: bool, counters: ErrorCounters, timestamps: bool) {
+    if let Some((from, to)) = errors.change()
+        && running
+    {
+        report_state(ep_in, in_buf, from, to, counters, timestamps).await;
+    }
+}
+
+/// Tells the host the level went from `from` to `to`.
+async fn report_state(ep_in: &mut impl EndpointIn, in_buf: &mut [u8; FD_TS_LEN], from: Level, to: Level, counters: ErrorCounters, timestamps: bool) {
     let mut host = error_frame(from, to, counters);
     host.timestamp_us = timestamps.then(|| micros(Instant::now()));
     write(ep_in, host.encode(in_buf)).await;
@@ -659,30 +753,21 @@ fn bus_error_frame(error: BusError, counters: ErrorCounters) -> HostFrame {
     }
 }
 
-/// The error frame telling the host the bus state went from `from` to `to`,
-/// as Linux's `gs_usb` reads it: bus-off and restarts in the identifier,
-/// error passive and back to active in `data[1]`, and the error counters in
-/// `data[6]` and `data[7]`.
-fn error_frame(from: BusState, to: BusState, counters: ErrorCounters) -> HostFrame {
+/// The error frame telling the host the level went from `from` to `to`, as
+/// Linux's `gs_usb` reads it: bus-off and restarts in the identifier, the
+/// other levels in `data[1]`, and the error counters in `data[6]` and
+/// `data[7]`.
+fn error_frame(from: Level, to: Level, counters: ErrorCounters) -> HostFrame {
     let mut can_id = can_id::ERR | can_err::CNT;
     let mut data = [0; 64];
     data[6] = counters.transmit;
     data[7] = counters.receive;
     match to {
-        BusState::BusOff => can_id |= can_err::BUSOFF,
-        BusState::ErrorPassive => {
+        Level::BusOff => can_id |= can_err::BUSOFF,
+        Level::Active if from == Level::BusOff => can_id |= can_err::RESTARTED,
+        _ => {
             can_id |= can_err::CRTL;
-            let passive = |count: u8, flag: u8| if count >= 128 { flag } else { 0 };
-            data[1] = passive(counters.transmit, can_err::crtl::TX_PASSIVE) | passive(counters.receive, can_err::crtl::RX_PASSIVE);
-            if data[1] == 0 {
-                // The counters fell back between the change and reading them.
-                data[1] = can_err::crtl::TX_PASSIVE;
-            }
-        }
-        BusState::ErrorActive if from == BusState::BusOff => can_id |= can_err::RESTARTED,
-        BusState::ErrorActive => {
-            can_id |= can_err::CRTL;
-            data[1] = can_err::crtl::ACTIVE;
+            data[1] = crtl_flags(to, counters);
         }
     }
     HostFrame {
@@ -694,6 +779,27 @@ fn error_frame(from: BusState, to: BusState, counters: ErrorCounters) -> HostFra
         data,
         timestamp_us: None,
     }
+}
+
+/// The `data[1]` flags for `level`, as candleLight sets them: the flag of
+/// whichever counter is at the higher level, or both when they are at the
+/// same one (Linux takes warning before passive, so the lower must not come
+/// with the higher). When the counters moved between the change and reading
+/// them, the transmit counter's flag for `level`.
+fn crtl_flags(level: Level, counters: ErrorCounters) -> u8 {
+    let tx = Level::of_counter(counters.transmit);
+    let rx = Level::of_counter(counters.receive);
+    if tx.max(rx) != level {
+        return level.tx_flag();
+    }
+    let mut flags = 0;
+    if tx >= rx {
+        flags |= tx.tx_flag();
+    }
+    if tx <= rx {
+        flags |= rx.rx_flag();
+    }
+    flags
 }
 
 /// Leaves the bus and forgets everything the host sent before: the frames

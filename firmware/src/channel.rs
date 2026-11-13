@@ -138,6 +138,11 @@ pub trait Channel {
     /// The next bus error, when they are reported; otherwise never.
     fn next_bus_error(&self) -> impl Future<Output = BusError>;
 
+    /// Whether an error counter is at the warning level (96), once that has
+    /// changed, waiting for a change. It follows the counters, so it stays
+    /// set while error passive or bus-off.
+    fn next_warning_change(&self) -> impl Future<Output = bool>;
+
     /// Leaves the bus, cancelling the transmissions outstanding.
     ///
     /// # Errors
