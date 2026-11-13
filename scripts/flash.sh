@@ -101,13 +101,23 @@ fi
 echo "Starting it"
 bounded dfu-util -d "$ROM" -a 0 -s "$ADDRESS:4:leave" -U "$tmp/leave.bin" >/dev/null 2>&1 || true
 
+# Back when the board is: by its serial number if we have it, else when
+# as many adapters are there as before (one, if it came from the switch).
+back() {
+    if [ -n "$serial" ]; then
+        dfu-util -l 2>/dev/null | grep "\[$FERROCAN\]" | grep -q "serial=\"$serial\""
+    else
+        [ "$(devices "$FERROCAN")" -ge "$((running > 0 ? running : 1))" ]
+    fi
+}
 tries=0
-while [ "$(devices "$FERROCAN")" -le "$running" ] && [ $tries -lt 10 ]; do
+until back || [ $tries -ge 20 ]; do
     tries=$((tries + 1))
     sleep 0.5
 done
-if [ "$(devices "$FERROCAN")" -gt "$running" ] || [ -n "$serial" ]; then
+if back; then
     echo "Done: ferrocan is running"
 else
     echo "Written and verified, but the adapter hasn't come back: if its BOOT switch is on, switch it off and replug it"
+    exit 1
 fi
