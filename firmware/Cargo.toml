@@ -46,11 +46,12 @@ fdcan = ["dep:can-hal-fdcan", "cortex-m-rt/set-sp", "cortex-m-rt/set-vtor"]
 panic-dfu = []
 
 [dependencies]
-can-hal = { version = "0.4.3", path = "../../can-hal-rs/can-hal", package = "can-hal-rs", default-features = false }
-# The drivers live in can-hal-embedded, checked out beside this repository.
-can-hal-bxcan = { path = "../../can-hal-embedded/can-hal-bxcan", features = ["defmt"], optional = true }
-can-hal-fdcan = { path = "../../can-hal-embedded/can-hal-fdcan", features = ["defmt"], optional = true }
-gs_usb_protocol = { path = "../../can_usb_rs/gs_usb_protocol" }
+# Our libraries, from GitHub; Cargo.lock pins the commits. To build against
+# local checkouts, patch them in .cargo/local.toml (see the README).
+can-hal = { version = "0.4.3", git = "https://github.com/aeolionics-rs/can-hal-rs", branch = "aeolionics", package = "can-hal-rs", default-features = false }
+can-hal-bxcan = { git = "https://github.com/aeolionics-rs/can-hal-embedded", branch = "main", features = ["defmt"], optional = true }
+can-hal-fdcan = { git = "https://github.com/aeolionics-rs/can-hal-embedded", branch = "main", features = ["defmt"], optional = true }
+gs_usb_protocol = { git = "https://github.com/aeolionics-rs/can_usb_rs", branch = "main" }
 embassy-stm32 = { version = "0.6.0", features = ["defmt", "memory-x", "time-driver-tim2", "unstable-pac"] }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "defmt"] }
 embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime", "tick-hz-1_000_000"] }

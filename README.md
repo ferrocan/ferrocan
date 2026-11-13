@@ -15,15 +15,42 @@ the frame is on the bus rather than when it is queued.
 
 The gs_usb wire format, `gs_usb_protocol`, lives in
 [can_usb_rs](https://github.com/aeolionics-rs/can_usb_rs) beside the host
-driver, `can_usb_gs`, and is checked out beside this repository.
+driver, `can_usb_gs`.
 
 The CAN drivers, `can-hal-bxcan` (bxCAN) and `can-hal-fdcan` (FDCAN), are
 [can-hal](https://github.com/can-hal-rs-contributors/can-hal-rs) backends in
-[can-hal-embedded](https://github.com/aeolionics-rs/can-hal-embedded), checked
-out beside this repository, as is our can-hal fork (`../can-hal-rs`, on its
-`aeolionics` branch) for the confirmed-transmission traits they use. Their
-channels confirm transmissions: a frame is reported sent when the controller
-says it was acknowledged, in bus order with the frames received.
+[can-hal-embedded](https://github.com/aeolionics-rs/can-hal-embedded), built
+on the confirmed-transmission traits of our
+[can-hal fork](https://github.com/aeolionics-rs/can-hal-rs)'s `aeolionics`
+branch. Their channels confirm transmissions: a frame is reported sent when
+the controller says it was acknowledged, in bus order with the frames
+received.
+
+All three are git dependencies, which `Cargo.lock` pins to commits.
+
+## Building against local checkouts
+
+For changes to the libraries not yet pushed, check them out beside this
+repository and patch them in `.cargo/local.toml`, which `.cargo/config.toml`
+includes if it exists and git ignores:
+
+```toml
+[patch."https://github.com/aeolionics-rs/can-hal-embedded"]
+can-hal-bxcan = { path = "../can-hal-embedded/can-hal-bxcan" }
+can-hal-fdcan = { path = "../can-hal-embedded/can-hal-fdcan" }
+
+[patch."https://github.com/aeolionics-rs/can_usb_rs"]
+gs_usb_protocol = { path = "../can_usb_rs/gs_usb_protocol" }
+
+[patch."https://github.com/aeolionics-rs/can-hal-rs"]
+can-hal-rs = { path = "../can-hal-rs/can-hal" }
+```
+
+A patched build rewrites the patched entries in `Cargo.lock` as local paths.
+That does no harm: an unpatched build puts the git entries back, and the
+release workflow regenerates the lockfile before it builds. Merge a library's
+change before the ferrocan change that needs it, so that CI builds against
+it.
 
 # Status
 

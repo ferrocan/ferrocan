@@ -1,3 +1,7 @@
+# Local overrides, untracked: a [patch] pointing the git dependencies at the
+# sibling checkouts, for changes not yet pushed (see the README).
+include = [{ path = "local.toml", optional = true }]
+
 # One alias per board: each names its target, its feature and its debug
 # probe. The firmware builds for one board at a time; there is no default
 # target, so that the host-side crates still build and test natively.
